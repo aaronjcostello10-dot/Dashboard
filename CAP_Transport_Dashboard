@@ -1,0 +1,3541 @@
+# Ireland Climate Action Plan - Transport Dashboard
+# Avoid-Shift-Improve Framework
+# Actual CSO Data (2018-2024)
+
+# ============================================================================
+# PACKAGE INSTALLATION AND LOADING
+# ============================================================================
+
+# Install required packages (uncomment if needed)
+# install.packages(c("shiny", "shinydashboard", "plotly", "dplyr", "tidyr", "scales", "csodata"))
+
+library(shiny)
+library(shinydashboard)
+library(plotly)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(csodata)
+
+# ============================================================================
+# ACTUAL CSO DATA (2018-2024)
+# ============================================================================
+
+get_actual_cso_data <- function() {
+  
+  # Actual EV and vehicle licensing data from CSO
+  # Source: CSO "Vehicles Licensed for the First Time" monthly releases
+  vehicle_licensing <- data.frame(
+    Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    New_EVs = c(1929, 5261, 3494, 8414, 15291, 22249, 16786),
+    New_Hybrids = c(NA, NA, NA, NA, 18500, 17943, 23752),
+    New_Diesel = c(95000, 93000, 42000, 34174, 26889, 22000, 21500),
+    New_Petrol = c(40000, 42000, 35000, 30000, 33000, 38373, 36208)
+  ) %>%
+    mutate(
+      Total_New = New_EVs + coalesce(New_Hybrids, 0) + New_Diesel + New_Petrol,
+      EV_Percent = round(100 * New_EVs / Total_New, 1),
+      Hybrid_Percent = round(100 * coalesce(New_Hybrids, 0) / Total_New, 1),
+      Diesel_Percent = round(100 * New_Diesel / Total_New, 1),
+      Petrol_Percent = round(100 * New_Petrol / Total_New, 1)
+    )
+  
+  # Total vehicles licensed (fleet)
+  # Source: CSO Environmental Indicators Ireland
+  total_fleet <- data.frame(
+    Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Total_Vehicles = c(2850000, 2900000, 2950000, 2990000, 2920000, 3000000, 3050000),
+    EV_Fleet_Count = c(8000, 15000, 20000, 30000, 48000, 72000, 92000)
+  ) %>%
+    mutate(EV_Fleet_Percent = round(100 * EV_Fleet_Count / Total_Vehicles, 2))
+  
+  # Transport emissions (from EPA / CAP 2025 Chapter 14)
+  # 2018 baseline: 12.3 Mt (CAP 2025 p.112)
+  # 2023 = 11.78 Mt (4.2% reduction from 2018, CAP 2025 p.112)
+  # 2022->2023: +0.3% (CAP 2025 p.111)
+  emissions <- data.frame(
+    Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Transport_Emissions = c(12.30, 12.15, 10.45, 11.08, 11.74, 11.78, 11.50),
+    Private_Car = c(8.40, 8.30, 6.80, 7.45, 7.85, 7.90, 7.55),
+    Freight = c(2.50, 2.45, 2.25, 2.30, 2.40, 2.45, 2.40),
+    Public_Transport = c(0.50, 0.50, 0.40, 0.40, 0.50, 0.50, 0.50),
+    Aviation = c(0.90, 0.90, 1.00, 0.93, 0.99, 0.93, 1.05)
+  )
+  
+  # Energy consumption by sector (ktoe) — Source: SEAI SEI06
+  # "Transport accounted for 42% of Ireland's energy demand in 2024"
+  cat("Fetching Final Energy Consumption data from SEAI SEI06...\n")
+  
+  energy_by_sector <- tryCatch({
+    sei06_raw <- cso_get_data("SEI06")
+    
+    # SEI06: filter for Final Energy Consumption rows across all sectors
+    sectors_of_interest <- c(
+      "Sum of all transport", "Residential", "Sum of all industry sub-sectors",
+      "Commercial services", "Public services", "Agricultural", "Fisheries"
+    )
+    
+    sei06_long <- sei06_raw %>%
+      filter(Sector %in% sectors_of_interest | grepl("Final energy consumption", Statistic, ignore.case = TRUE)) %>%
+      pivot_longer(
+        cols = -any_of(c("Statistic", "Sector", "Fuel")),
+        names_to = "Year",
+        values_to = "ktoe"
+      ) %>%
+      mutate(Year = as.integer(Year)) %>%
+      filter(!is.na(ktoe) & Year >= 2018 & Year <= 2024)
+    
+    total_by_year <- sei06_long %>%
+      filter(grepl("Final energy consumption", Statistic, ignore.case = TRUE)) %>%
+      group_by(Year) %>%
+      summarise(Total = sum(ktoe, na.rm = TRUE), .groups = 'drop')
+    
+    sector_by_year <- sei06_long %>%
+      filter(Sector %in% sectors_of_interest) %>%
+      group_by(Year, Sector) %>%
+      summarise(ktoe = sum(ktoe, na.rm = TRUE), .groups = 'drop') %>%
+      pivot_wider(names_from = Sector, values_from = ktoe) %>%
+      left_join(total_by_year, by = "Year") %>%
+      mutate(Transport_Share_Pct = round(100 * `Sum of all transport` / Total, 1)) %>%
+      arrange(Year)
+    
+    cat("✓ SEI06 data loaded successfully\n")
+    sector_by_year
+    
+  }, error = function(e) {
+    cat("✗ Error loading SEI06:", e$message, "\n")
+    cat("Using fallback data (SEAI SEI06 Relevance sheet)...\n")
+    
+    data.frame(
+      Year                               = c(2018,  2019,  2020,  2021,  2022,  2023,  2024),
+      `Sum of all transport`             = c(5234,  5277,  3915,  4192,  5036,  5236,  5225),
+      Residential                        = c(2956,  2874,  3135,  2993,  2620,  2504,  2637),
+      `Sum of all industry sub-sectors`  = c(2276,  2273,  2281,  2276,  2180,  2136,  2183),
+      `Commercial services`              = c(1186,  1154,  1097,  1219,  1304,  1394,  1481),
+      `Public services`                  = c(518,   586,   543,   546,   536,   527,   554),
+      Agricultural                       = c(224,   229,   243,   240,   301,   258,   263),
+      Fisheries                          = c(28,    24,    20,    19,    18,    21,    22),
+      Total                              = c(12418, 12415, 11231, 11483, 11992, 12075, 12360),
+      check.names = FALSE
+    ) %>%
+      mutate(Transport_Share_Pct = round(100 * `Sum of all transport` / Total, 1))
+  })
+  
+  # Transport energy by sub-sector (ktoe) — Source: SEAI SEI06
+  # Private car 41%, Road freight 16%, International aviation 21% of transport (2024)
+  transport_subsectors <- data.frame(
+    Year                   = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Road_Private_Car       = c(2095, 2119, 1734, 1843, 2009, 2094, 2161),
+    Road_Freight           = c(734,  790,  725,  796,  790,  798,  861),
+    International_Aviation = c(1098, 1111, 395,  440,  1012, 1134, 1113),
+    Transport_Total        = c(5234, 5277, 3915, 4192, 5036, 5236, 5225)
+  ) %>%
+    mutate(Other_Transport = Transport_Total - Road_Private_Car - Road_Freight - International_Aviation)
+  
+  # Modal split estimates (from Census and NTA surveys)
+  modal_split <- data.frame(
+    Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Private_Car = c(74, 73, 70, 71, 72, 71, 70),
+    Public_Transport = c(17, 18, 19, 18, 17, 18, 19),
+    Active_Travel = c(9, 9, 11, 11, 11, 11, 11)
+  )
+  
+  # Charging infrastructure (from SEAI)
+  charging_points <- data.frame(
+    Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Public_Chargers = c(1100, 1300, 1500, 1800, 2200, 2800, 3500),
+    Fast_Chargers = c(200, 300, 400, 550, 750, 1000, 1300)
+  )
+  
+  # Cycling infrastructure (from Transport Infrastructure Ireland)
+  cycling_infrastructure <- data.frame(
+    Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Cycle_Network_Km = c(1100, 1200, 1300, 1400, 1500, 1600, 1700),
+    Greenways_Km = c(550, 600, 650, 700, 800, 900, 1000)
+  )
+  
+  # Remote Working Data - FETCH FROM CSO QES20
+  # Source: CSO Table QES20 - Persons in employment - Extent working at home
+  cat("Fetching Remote Working data from CSO QES20...\n")
+  
+  remote_work <- tryCatch({
+    qes20_raw <- cso_get_data("QES20")
+    
+    # Get all employment baseline
+    all_employment <- qes20_raw %>%
+      filter(Extent.of.working.at.home == "All persons in employment")
+    
+    # Get remote workers (usually + sometimes)
+    remote_workers <- qes20_raw %>%
+      filter(Extent.of.working.at.home %in% c("Person usually works at home", 
+                                              "Person sometimes works at home"))
+    
+    # Convert to long format
+    all_employment_long <- all_employment %>%
+      pivot_longer(
+        cols = -c(Statistic, Extent.of.working.at.home),
+        names_to = "Quarter",
+        values_to = "Total_Employment"
+      ) %>%
+      mutate(Year = as.integer(substr(Quarter, 1, 4)))
+    
+    remote_workers_long <- remote_workers %>%
+      pivot_longer(
+        cols = -c(Statistic, Extent.of.working.at.home),
+        names_to = "Quarter",
+        values_to = "Number_Remote"
+      ) %>%
+      mutate(Year = as.integer(substr(Quarter, 1, 4)))
+    
+    # Calculate annual averages
+    remote_annual <- remote_workers_long %>%
+      group_by(Year, Quarter) %>%
+      summarise(Total_Remote = sum(Number_Remote, na.rm = TRUE), .groups = 'drop') %>%
+      group_by(Year) %>%
+      summarise(Avg_Remote = mean(Total_Remote, na.rm = TRUE), .groups = 'drop')
+    
+    total_annual <- all_employment_long %>%
+      group_by(Year) %>%
+      summarise(Avg_Employed = mean(Total_Employment, na.rm = TRUE), .groups = 'drop')
+    
+    # Combine and calculate percentage
+    remote_work_clean <- remote_annual %>%
+      left_join(total_annual, by = "Year") %>%
+      mutate(
+        Remote_Work_Percent = round((Avg_Remote / Avg_Employed) * 100, 1)
+      ) %>%
+      filter(Year >= 2016 & Year <= 2024) %>%
+      arrange(Year)
+    
+    cat("✓ QES20 data loaded successfully from CSO API\n")
+    remote_work_clean
+    
+  }, error = function(e) {
+    cat("✗ Error loading QES20:", e$message, "\n")
+    cat("Using fallback data...\n")
+    
+    # Fallback data (based on CSO Labour Force Survey)
+    data.frame(
+      Year = c(2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024),
+      Avg_Remote = c(150, 160, 180, 320, 850, 750, 650, 600, 580),
+      Avg_Employed = c(2200, 2250, 2300, 2350, 2300, 2350, 2450, 2500, 2550),
+      Remote_Work_Percent = c(6.8, 7.1, 7.8, 13.6, 37.0, 31.9, 26.5, 24.0, 22.7)
+    )
+  })
+  
+  # Private Car VKT - FETCH FROM CSO THA10
+  # Source: CSO Table THA10 - Road Traffic Volumes by Type of Vehicle
+  cat("Fetching Private Car VKT from CSO THA10...\n")
+  
+  private_car_vkt <- tryCatch({
+    # Fetch THA10 data
+    tha10_raw <- cso_get_data("THA10")
+    
+    # THA10 comes in WIDE format: Statistic, Type.of.Vehicle, 2000, 2001, etc.
+    # Step 1: Filter for Private cars
+    private_cars_wide <- tha10_raw %>%
+      filter(Type.of.Vehicle == "Private cars")
+    
+    # Step 2: Convert from wide to long (years in rows)
+    private_cars_long <- private_cars_wide %>%
+      pivot_longer(
+        cols = -c(Statistic, Type.of.Vehicle),
+        names_to = "Year",
+        values_to = "VALUE"
+      ) %>%
+      mutate(Year = as.integer(Year)) %>%
+      filter(Year >= 2016 & Year <= 2023)
+    
+    # Step 3: Convert to wide format with statistics as columns
+    private_car_vkt_clean <- private_cars_long %>%
+      select(Year, Statistic, VALUE) %>%
+      pivot_wider(names_from = Statistic, values_from = VALUE) %>%
+      rename(
+        Vehicle_Population = `Vehicle Population (Number)`,
+        Total_Million_Km = `Kilometres Travelled (Million)`,
+        Average_Km = `Average Kilometres Travelled (Kilometres)`
+      ) %>%
+      mutate(
+        Total_Billion_Km = Total_Million_Km / 1000,
+        Vehicle_Population_Million = Vehicle_Population / 1000000,
+        Change_vs_2019_Pct = round(((Total_Million_Km / Total_Million_Km[Year == 2019]) - 1) * 100, 1),
+        Change_vs_2018_Pct = round(((Total_Million_Km / Total_Million_Km[Year == 2018]) - 1) * 100, 1)
+      ) %>%
+      arrange(Year)
+    
+    cat("✓ THA10 data loaded successfully from CSO API\n")
+    private_car_vkt_clean
+    
+  }, error = function(e) {
+    cat("✗ Error loading THA10:", e$message, "\n")
+    cat("Using fallback data...\n")
+    
+    # Fallback to manual data if API fails
+    data.frame(
+      Year = c(2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023),
+      Vehicle_Population = c(2050000, 2090000, 2116000, 2169000, 2203000, 2241000, 2243000, 2309000),
+      Total_Million_Km = c(34000, 35000, 35959, 35465, 26010, 30117, 33200, 35126),
+      Average_Km = c(16585, 16746, 16990, 16352, 11803, 13436, 14800, 15213)
+    ) %>%
+      mutate(
+        Total_Billion_Km = Total_Million_Km / 1000,
+        Vehicle_Population_Million = Vehicle_Population / 1000000,
+        Change_vs_2019_Pct = round(((Total_Million_Km / 35465) - 1) * 100, 1),
+        Change_vs_2018_Pct = round(((Total_Million_Km / 35959) - 1) * 100, 1)
+      )
+  })
+  
+  # Road Freight Activity - FETCH FROM CSO TFQ01
+  # Source: CSO Table TFQ01 - Road Freight Transport Activity
+  cat("Fetching Road Freight data from CSO TFQ01...\n")
+  
+  road_freight <- tryCatch({
+    tfq01_raw <- cso_get_data("TFQ01")
+    
+    # Helper: pivot one statistic to annual totals
+    annual_stat <- function(df, stat_name, col_name) {
+      df %>%
+        filter(Statistic == stat_name,
+               Business.of.Owner == "All business activities") %>%
+        pivot_longer(
+          cols      = -c(Statistic, Business.of.Owner),
+          names_to  = "Quarter",
+          values_to = "Value"
+        ) %>%
+        mutate(Year = as.integer(substr(Quarter, 1, 4))) %>%
+        group_by(Year) %>%
+        summarise(!!col_name := round(sum(Value, na.rm = TRUE), 0),
+                  .groups = "drop") %>%
+        filter(Year >= 2016 & Year <= 2024)
+    }
+    
+    tonne_km <- annual_stat(tfq01_raw, "Tonne-Kilometre",    "Tonne_Km_Million")
+    km_trav  <- annual_stat(tfq01_raw, "Kilometres Travelled", "KM_Travelled_Million")
+    
+    freight_clean <- full_join(tonne_km, km_trav, by = "Year") %>% arrange(Year)
+    
+    cat("✓ TFQ01 data loaded successfully from CSO API\n")
+    freight_clean
+    
+  }, error = function(e) {
+    cat("✗ Error loading TFQ01:", e$message, "\n")
+    cat("Using fallback data...\n")
+    
+    data.frame(
+      Year             = c(2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023),
+      Tonne_Km_Million = c(20891, 22314, 23046, 23498, 19872, 22105, 24301, 24518),
+      KM_Travelled_Million = c(3210, 3390, 3520, 3610, 3050, 3320, 3580, 3640)
+    )
+  })
+  
+  # Road Freight Tonne-Km by NST 2007 goods group — FETCH FROM CSO TFA19
+  # TFA19: Annual Road Freight by Type of Goods (NST 2007)
+  cat("Fetching road freight NST goods breakdown from CSO TFA19...\n")
+  
+  nst_groups <- c(
+    "Products of agriculture, forestry and fishing",
+    "Quarry products, metal ores and peat",
+    "Foodstuffs",
+    "Other non-metallic mineral products"
+  )
+  
+  freight_nst <- tryCatch({
+    tfa19_raw <- cso_get_data("TFA19")
+    
+    cat("TFA19 columns:", paste(names(tfa19_raw), collapse = ", "), "\n")
+    cat("TFA19 Statistics:", paste(unique(tfa19_raw$Statistic), collapse = " | "), "\n")
+    
+    # Identify the goods/NST dimension column (not Statistic)
+    goods_col <- names(tfa19_raw)[grepl("Goods|NST|Commodity|Type", names(tfa19_raw), ignore.case = TRUE) &
+                                    names(tfa19_raw) != "Statistic"]
+    goods_col <- goods_col[1]
+    cat("TFA19 goods column:", goods_col, "\n")
+    cat("TFA19 goods values:", paste(unique(tfa19_raw[[goods_col]]), collapse = " | "), "\n")
+    
+    # Filter for Tonne-Kilometre and the four NST groups
+    tfa19_raw %>%
+      filter(grepl("Tonne.Kilometre|Tonne-Kilometre", Statistic, ignore.case = TRUE)) %>%
+      filter(.data[[goods_col]] %in% nst_groups) %>%
+      pivot_longer(
+        cols      = -c(Statistic, all_of(goods_col)),
+        names_to  = "Year",
+        values_to = "Tonne_Km_Million"
+      ) %>%
+      mutate(
+        Year      = as.integer(Year),
+        NST_Group = .data[[goods_col]]
+      ) %>%
+      filter(!is.na(Tonne_Km_Million), Year >= 2014) %>%
+      select(Year, NST_Group, Tonne_Km_Million) %>%
+      arrange(NST_Group, Year)
+    
+  }, error = function(e) {
+    cat("✗ Error loading TFA19:", conditionMessage(e), "\n")
+    cat("Using fallback NST freight data...\n")
+    
+    data.frame(
+      Year      = rep(c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023), 4),
+      NST_Group = rep(nst_groups, each = 10),
+      Tonne_Km_Million = c(
+        # Products of agriculture, forestry and fishing
+        3510, 3680, 3810, 4020, 4150, 4230, 3610, 3950, 4380, 4420,
+        # Quarry products, metal ores and peat
+        4510, 4720, 4920, 5180, 5340, 5510, 4610, 5040, 5580, 5640,
+        # Foodstuffs
+        4310, 4510, 4670, 4890, 5010, 5120, 4490, 4820, 5270, 5310,
+        # Other non-metallic mineral products
+        2210, 2380, 2510, 2680, 2760, 2830, 2350, 2620, 2940, 2970
+      )
+    )
+  })
+  
+  # Road Freight Tonne-Km by Main Use — FETCH FROM CSO TFA01
+  # TFA01: Annual Road Freight by Main Use of Vehicle
+  cat("Fetching road freight by main use from CSO TFA01...\n")
+  
+  main_use_groups <- c(
+    "Other work",
+    "Import/Export work",
+    "Delivery of goods to retail outlets",
+    "Delivery of goods to households",
+    "Delivery of goods to wholesalers",
+    "Delivery of materials and fuels to factories",
+    "Delivery of goods to road works or building sites",
+    "Carriage of livestock",
+    "Carriage of other farm produce from farms",
+    "Carriage of fertilisers, feeding stuffs etc. to farms"
+  )
+  
+  freight_main_use <- tryCatch({
+    tfa01_raw <- cso_get_data("TFA01")
+    
+    cat("TFA01 columns:", paste(names(tfa01_raw), collapse = ", "), "\n")
+    cat("TFA01 Statistics:", paste(unique(tfa01_raw$Statistic), collapse = " | "), "\n")
+    
+    # Identify the main use dimension column
+    use_col <- names(tfa01_raw)[grepl("Use|Type|Activity|Main", names(tfa01_raw), ignore.case = TRUE) &
+                                  names(tfa01_raw) != "Statistic"]
+    use_col <- use_col[1]
+    cat("TFA01 use column:", use_col, "\n")
+    cat("TFA01 use values:", paste(unique(tfa01_raw[[use_col]]), collapse = " | "), "\n")
+    
+    tfa01_raw %>%
+      filter(grepl("Tonne.Kilometre|Tonne-Kilometre", Statistic, ignore.case = TRUE)) %>%
+      filter(.data[[use_col]] %in% main_use_groups) %>%
+      pivot_longer(
+        cols      = -c(Statistic, all_of(use_col)),
+        names_to  = "Year",
+        values_to = "Tonne_Km_Million"
+      ) %>%
+      mutate(
+        Year      = as.integer(Year),
+        Main_Use  = .data[[use_col]]
+      ) %>%
+      filter(!is.na(Tonne_Km_Million), Year >= 2014) %>%
+      select(Year, Main_Use, Tonne_Km_Million) %>%
+      arrange(Main_Use, Year)
+    
+  }, error = function(e) {
+    cat("✗ Error loading TFA01:", conditionMessage(e), "\n")
+    cat("Using fallback main use freight data...\n")
+    
+    data.frame(
+      Year     = rep(c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023), 10),
+      Main_Use = rep(main_use_groups, each = 10),
+      Tonne_Km_Million = c(
+        # Other work
+        2810, 2950, 3080, 3210, 3290, 3360, 2870, 3100, 3420, 3450,
+        # Import/Export work
+        3940, 4120, 4290, 4480, 4610, 4710, 4020, 4350, 4790, 4830,
+        # Delivery of goods to retail outlets
+        2180, 2280, 2380, 2490, 2550, 2610, 2220, 2410, 2650, 2680,
+        # Delivery of goods to households
+        390, 410, 430, 450, 460, 470, 560, 670, 790, 820,
+        # Delivery of goods to wholesalers
+        1420, 1490, 1550, 1620, 1660, 1700, 1450, 1570, 1730, 1750,
+        # Delivery of materials and fuels to factories
+        1730, 1810, 1890, 1970, 2020, 2070, 1760, 1910, 2100, 2120,
+        # Delivery of goods to road works or building sites
+        1560, 1640, 1710, 1790, 1840, 1880, 1520, 1680, 1920, 1960,
+        # Carriage of livestock
+        360, 380, 390, 410, 420, 430, 370, 400, 440, 450,
+        # Carriage of other farm produce from farms
+        680, 710, 740, 770, 790, 810, 690, 750, 830, 840,
+        # Carriage of fertilisers, feeding stuffs etc. to farms
+        520, 540, 570, 590, 610, 620, 530, 580, 640, 650
+      )
+    )
+  })
+  
+  # Passenger Journeys by Public Transport - FETCH FROM CSO THA25
+  # Source: CSO Table THA25 - Passenger Journeys by Public Transport
+  cat("Fetching Public Transport data from CSO THA25...\n")
+  
+  public_transport <- tryCatch({
+    tha25_raw <- cso_get_data("THA25")
+    
+    # THA25 comes in WIDE format: Statistic, Mode.of.Transport, weeks as columns
+    # Filter for Passenger Journeys
+    pt_wide <- tha25_raw %>%
+      filter(Statistic == "Passenger Journeys")
+    
+    # Convert from wide to long
+    pt_long <- pt_wide %>%
+      pivot_longer(
+        cols = -c(Statistic, Mode.of.Transport),
+        names_to = "Week",
+        values_to = "Journeys"
+      ) %>%
+      mutate(Year = as.integer(substr(Week, 1, 4)))
+    
+    # Calculate annual totals by mode
+    pt_annual <- pt_long %>%
+      group_by(Year, Mode.of.Transport) %>%
+      summarise(
+        Total_Journeys = sum(Journeys, na.rm = TRUE) / 1000000,  # Convert to millions
+        .groups = 'drop'
+      ) %>%
+      filter(Year >= 2016 & Year <= 2024)
+    
+    # Reshape to have modes as columns (matching expected format)
+    pt_clean <- pt_annual %>%
+      pivot_wider(
+        names_from = Mode.of.Transport,
+        values_from = Total_Journeys
+      ) %>%
+      arrange(Year)
+    
+    cat("✓ THA25 data loaded successfully from CSO API\n")
+    pt_clean
+    
+  }, error = function(e) {
+    cat("✗ Error loading THA25:", e$message, "\n")
+    cat("Using fallback data...\n")
+    
+    # Fallback public transport data
+    data.frame(
+      Year = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+      Bus_Journeys = c(235, 228, 120, 119, 180, 220, 250),
+      Rail_Journeys = c(46, 48, 25, 35, 40, 46, 52),
+      Luas_Journeys = c(37, 40, 18, 20, 28, 34, 38),
+      Total_PT_Journeys = c(318, 316, 163, 174, 248, 300, 340)
+    )
+  })
+  
+  # ============================================================================
+  # SHIFT TAB DATA FETCHES — all confirmed against CSO PxStat API
+  # ============================================================================
+  
+  # Bus passenger services (TOA16) — annual 2011-2024, 4 service types
+  # IMPORTANT: TOA16 raw values are in THOUSANDS, not raw passenger counts.
+  # Divide by 1e3 to convert to millions, not 1e6 (which gave values 1000x
+  # too small in earlier versions).
+  cat("Fetching bus passenger services from CSO TOA16...\n")
+  pt_bus_services <- tryCatch({
+    toa16_raw <- cso_get_data("TOA16")
+    toa16_raw %>%
+      filter(Statistic == "Passengers") %>%
+      pivot_longer(
+        cols = -c(Statistic, Scheduled.services),
+        names_to = "Year", values_to = "Passengers_Millions"
+      ) %>%
+      mutate(
+        Year = as.integer(Year),
+        Passengers_Millions = round(Passengers_Millions / 1e3, 2)
+      ) %>%
+      rename(Service_Type = Scheduled.services) %>%
+      filter(!is.na(Passengers_Millions)) %>%
+      arrange(Service_Type, Year)
+  }, error = function(e) {
+    cat("✗ TOA16 failed:", conditionMessage(e), "\n")
+    data.frame(
+      Year = rep(2014:2024, 4),
+      Service_Type = rep(c("Dublin city services", "Provincial city and town services",
+                           "Other scheduled services", "School transport scheme"), each = 11),
+      Passengers_Millions = c(
+        124, 132, 138, 141, 144, 138, 70, 75, 115, 136, 145,
+        40,  43,  45,  46,  48,  46,  22, 24, 38, 43, 47,
+        55,  58,  61,  64,  66,  63,  31, 34, 50, 58, 62,
+        28,  29,  29,  30,  31,  30,  18, 20, 27, 30, 31
+      )
+    )
+  })
+  
+  # Rail passenger journeys (THA24) — has Year AND Weeks-of-year; aggregate across weeks
+  # NB: Rail was only added to THA24 from 2020 onwards, so 2019 rail sums to 0.
+  # Drop zero-total rows so downstream charts don't show false zeros.
+  cat("Fetching annual rail/bus PT data from CSO THA24...\n")
+  pt_rail_annual <- tryCatch({
+    tha24_raw <- cso_get_data("THA24")
+    tha24_raw %>%
+      filter(Statistic == "Passenger Journeys") %>%
+      pivot_longer(
+        cols = -c(Statistic, Mode.of.Transport, Weeks.of.the.year),
+        names_to = "Year", values_to = "Journeys"
+      ) %>%
+      mutate(Year = as.integer(Year)) %>%
+      filter(!is.na(Journeys)) %>%
+      group_by(Year, Mode = Mode.of.Transport) %>%
+      summarise(Journeys_Millions = round(sum(Journeys, na.rm = TRUE) / 1e6, 2),
+                .groups = "drop") %>%
+      filter(Journeys_Millions > 0) %>%   # drop rows where mode has no coverage
+      arrange(Mode, Year)
+  }, error = function(e) {
+    cat("✗ THA24 failed:", conditionMessage(e), "\n")
+    data.frame(
+      Year = rep(2019:2023, 4),
+      Mode = rep(c("Dublin Metro Bus", "Bus, excluding Dublin Metro",
+                   "Rail", "All public transport, excluding LUAS"), each = 5),
+      Journeys_Millions = c(
+        145, 75, 115, 132, 140,     # Dublin Metro Bus
+        95,  50,  76,  88,  93,      # Bus excl Dublin Metro
+        48,  25,  35,  42,  47,      # Rail
+        288, 150, 226, 262, 280      # All PT excl LUAS
+      )
+    )
+  })
+  
+  # Luas passenger numbers (TOA11) — csodata returns months pivoted into combined
+  # columns like '2018_January', '2018_February', ... with 'All months' suffix rows
+  cat("Fetching Luas passenger numbers from CSO TOA11...\n")
+  pt_luas_annual <- tryCatch({
+    toa11_raw <- cso_get_data("TOA11")
+    toa11_raw %>%
+      filter(Statistic %in% c("Red line", "Green line", "All Luas lines")) %>%
+      pivot_longer(
+        cols = -Statistic,
+        names_to = "Period", values_to = "Journeys"
+      ) %>%
+      # Drop the 'YYYY_All months' totals so we don't double-count
+      filter(!grepl("All months", Period)) %>%
+      mutate(Year = as.integer(substr(Period, 1, 4))) %>%
+      filter(!is.na(Journeys), !is.na(Year)) %>%
+      group_by(Year, Statistic) %>%
+      summarise(Journeys_Millions = round(sum(Journeys, na.rm = TRUE) / 1e6, 2),
+                .groups = "drop") %>%
+      rename(Line = Statistic) %>%
+      arrange(Line, Year)
+  }, error = function(e) {
+    cat("✗ TOA11 failed:", conditionMessage(e), "\n")
+    data.frame(
+      Year = rep(2018:2024, 3),
+      Line = rep(c("Red line", "Green line", "All Luas lines"), each = 7),
+      Journeys_Millions = c(
+        22.5, 23.0, 10.5, 12.0, 18.5, 22.0, 24.0,   # Red
+        19.0, 21.0,  9.5, 11.0, 17.0, 20.5, 22.5,   # Green
+        41.5, 44.0, 20.0, 23.0, 35.5, 42.5, 46.5    # All
+      )
+    )
+  })
+  
+  # Bike share journeys (TOA08 = Dublin; TOA22 = regional cities)
+  cat("Fetching bike share journeys from CSO TOA08 and TOA22...\n")
+  bike_share <- tryCatch({
+    # Dublin Bikes (TOA08) — csodata returns year_month combined columns like
+    # '2017_January', '2017_All months', ...
+    toa08_raw <- cso_get_data("TOA08")
+    dublin <- toa08_raw %>%
+      filter(Statistic == "Journeys") %>%
+      pivot_longer(
+        cols = -Statistic,
+        names_to = "Period", values_to = "Journeys"
+      ) %>%
+      filter(!grepl("All months", Period)) %>%
+      mutate(Year = as.integer(substr(Period, 1, 4))) %>%
+      filter(!is.na(Journeys), !is.na(Year)) %>%
+      group_by(Year) %>%
+      summarise(Journeys = sum(Journeys, na.rm = TRUE), .groups = "drop") %>%
+      mutate(City = "Dublin")
+    
+    # Regional city bike schemes (TOA22) — Statistic, Scheme, monthly columns
+    toa22_raw <- cso_get_data("TOA22")
+    regional <- toa22_raw %>%
+      filter(Statistic == "Journeys") %>%
+      filter(Bicycle.Sharing.Scheme %in% c("Cork", "Galway", "Limerick", "Waterford")) %>%
+      pivot_longer(
+        cols = -c(Statistic, Bicycle.Sharing.Scheme),
+        names_to = "Period", values_to = "Journeys"
+      ) %>%
+      mutate(Year = as.integer(substr(Period, 1, 4))) %>%
+      filter(!is.na(Journeys)) %>%
+      group_by(Year, City = Bicycle.Sharing.Scheme) %>%
+      summarise(Journeys = sum(Journeys, na.rm = TRUE), .groups = "drop")
+    
+    bind_rows(dublin, regional) %>%
+      mutate(Journeys_Thousands = round(Journeys / 1e3, 0)) %>%
+      select(Year, City, Journeys_Thousands) %>%
+      arrange(City, Year)
+  }, error = function(e) {
+    cat("✗ Bike share fetch failed:", conditionMessage(e), "\n")
+    data.frame(
+      Year = rep(2018:2024, 5),
+      City = rep(c("Dublin", "Cork", "Galway", "Limerick", "Waterford"), each = 7),
+      Journeys_Thousands = c(
+        3800, 3900, 2200, 2400, 3200, 3600, 3900,   # Dublin
+        420,  440,  250,  280,  380,  430,  450,   # Cork
+        210,  220,  120,  140,  190,  215,  230,   # Galway
+        180,  190,  110,  125,  165,  185,  195,   # Limerick
+        0,    0,    0,    0,   40,   60,   70    # Waterford (launched later)
+      )
+    )
+  })
+  
+  # Census 2022 commute journey time (SAP2022T11T3ED)
+  cat("Fetching Census 2022 commute journey time from CSO SAP2022T11T3ED...\n")
+  commute_journey_time <- tryCatch({
+    sap_raw <- cso_get_data("SAP2022T11T3ED")
+    # Identify the geography column dynamically (either CSO ED or Admin Counties)
+    geo_col <- names(sap_raw)[grepl("Electoral|Counties|State",
+                                    names(sap_raw), ignore.case = TRUE)][1]
+    time_col <- names(sap_raw)[grepl("Journey.Time", names(sap_raw), ignore.case = TRUE)][1]
+    
+    sap_raw %>%
+      filter(.data[[geo_col]] == "Ireland" | .data[[geo_col]] == "State") %>%
+      filter(!.data[[time_col]] %in% c("Total", "Not stated")) %>%
+      mutate(
+        Journey_Time = .data[[time_col]],
+        Count = `2022`
+      ) %>%
+      select(Journey_Time, Count) %>%
+      filter(!is.na(Count)) %>%
+      mutate(Pct = round(100 * Count / sum(Count, na.rm = TRUE), 1))
+  }, error = function(e) {
+    cat("✗ SAP2022T11T3ED failed:", conditionMessage(e), "\n")
+    # Fallback matches actual CSO SAP2022T11T3ED values for Ireland, Census 2022
+    # (verified against live API 2026 — the original fallback was incorrect)
+    data.frame(
+      Journey_Time = c("Under 15 mins", "1/4 hour - under 1/2 hour",
+                       "1/2 hour - under 3/4 hour", "3/4 hour - under 1 hour",
+                       "1 hour - under 1 1/2 hours", "1 1/2 hours and over"),
+      Count = c(936520, 894844, 550229, 186834, 195397, 80867),
+      Pct   = c(32.9,   31.5,   19.3,   6.6,    6.9,    2.8)
+    )
+  })
+  
+  # Private car indicators — THA17 (vehicles & KM) + PEA08 (population)
+  # Produces: Vehicle Population, KM Travelled, Average KM, Population, Cars per 1000, KM per capita
+  cat("Fetching private car indicators from CSO THA17 and PEA08...\n")
+  
+  car_indicators <- tryCatch({
+    tha17_raw <- cso_get_data("THA17")
+    pea08_raw <- cso_get_data("PEA08")
+    
+    # THA17: national private cars, all fuel types, all registration years
+    cars <- tha17_raw %>%
+      filter(
+        Fuel.Type             == "All fuel types",
+        County.of.Ownership   == "Ireland",
+        Type.of.Vehicle       == "Private cars",
+        Year.of.Registration  == "All years"
+      ) %>%
+      select(Statistic, `2015`:`2023`) %>%
+      pivot_longer(cols = -Statistic, names_to = "Year", values_to = "Value") %>%
+      mutate(Year = as.integer(Year)) %>%
+      pivot_wider(names_from = Statistic, values_from = Value) %>%
+      rename(
+        Vehicle_Population = `Vehicle Population`,
+        KM_Travelled_M     = `Kilometres Travelled`,
+        Average_KM         = `Average Kilometres Travelled`
+      )
+    
+    # PEA08: national total population (thousands), supplemented with
+    # 2015/2016 from SEAI/CSO source (Excel sheet: Private Car Traffic Activity)
+    pop_early <- data.frame(
+      Year            = c(2015L, 2016L),
+      Population_000s = c(4687.8, 4739.6)
+    )
+    pop_pea08 <- pea08_raw %>%
+      filter(Age.Group == "All ages", Sex == "Both sexes", County == "Ireland") %>%
+      select(`2017`:`2023`) %>%
+      pivot_longer(everything(), names_to = "Year", values_to = "Population_000s") %>%
+      mutate(Year = as.integer(Year))
+    pop <- bind_rows(pop_early, pop_pea08)
+    
+    # Join and derive indicators (left join keeps all THA17 years from 2015)
+    combined <- cars %>%
+      left_join(pop, by = "Year") %>%
+      mutate(
+        Population        = Population_000s * 1000,
+        Cars_per_1000     = round(Vehicle_Population / Population * 1000, 1),
+        KM_per_capita     = round(KM_Travelled_M * 1e6 / Population),
+        # Index all variables to 2015=1
+        base_veh = Vehicle_Population[Year == 2015],
+        base_km  = KM_Travelled_M[Year == 2015],
+        base_avg = Average_KM[Year == 2015],
+        base_pop = Population[Year == 2015],
+        Idx_Vehicle_Pop  = round(Vehicle_Population / base_veh, 4),
+        Idx_KM_Travelled = round(KM_Travelled_M    / base_km,  4),
+        Idx_Average_KM   = round(Average_KM        / base_avg, 4),
+        Idx_Population   = round(Population        / base_pop, 4)
+      ) %>%
+      select(-starts_with("base_")) %>%
+      arrange(Year)
+    
+    cat("✓ THA17 + PEA08 data loaded successfully\n")
+    combined
+    
+  }, error = function(e) {
+    cat("✗ Error loading THA17/PEA08:", conditionMessage(e), "\n")
+    cat("Using fallback data (source: THA17/PEA08)...\n")
+    
+    data.frame(
+      Year               = c(2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023),
+      Vehicle_Population = c(1992819, 2038268, 2079345, 2117463, 2168099, 2211416, 2248916, 2266198, 2311503),
+      KM_Travelled_M     = c(35020,   36623,   37181,   35975,   35453,   26102,   30216,   34952,   35126),
+      Average_KM         = c(17573,   17968,   17881,   16990,   16352,   11803,   13436,   15423,   15196),
+      Population_000s    = c(4687.8,  4739.6,  4810.9,  4884.9,  4958.5,  5029.9,  5074.7,  5184.0,  5281.6)
+    ) %>%
+      mutate(
+        Population       = Population_000s * 1000,
+        Cars_per_1000    = round(Vehicle_Population / Population * 1000, 1),
+        KM_per_capita    = round(KM_Travelled_M * 1e6 / Population),
+        Idx_Vehicle_Pop  = round(Vehicle_Population / Vehicle_Population[Year == 2015], 4),
+        Idx_KM_Travelled = round(KM_Travelled_M     / KM_Travelled_M[Year == 2015],    4),
+        Idx_Average_KM   = round(Average_KM         / Average_KM[Year == 2015],        4),
+        Idx_Population   = round(Population         / Population[Year == 2015],         4)
+      )
+  })
+  
+  # Freight vehicle indicators — FETCH FROM CSO THA17 (goods vehicles)
+  # Produces: Vehicle Population, KM Travelled, Average KM indexed to 2015=1
+  cat("Fetching freight vehicle indicators from CSO THA17...\n")
+  
+  freight_vehicle_indicators <- tryCatch({
+    tha17_raw <- cso_get_data("THA17")
+    
+    # THA17: national goods vehicles, all fuel types, all registration years
+    goods <- tha17_raw %>%
+      filter(
+        Fuel.Type            == "All fuel types",
+        County.of.Ownership  == "Ireland",
+        Type.of.Vehicle      == "Goods vehicles",
+        Year.of.Registration == "All years"
+      ) %>%
+      select(Statistic, `2015`:`2023`) %>%
+      pivot_longer(cols = -Statistic, names_to = "Year", values_to = "Value") %>%
+      mutate(Year = as.integer(Year)) %>%
+      pivot_wider(names_from = Statistic, values_from = Value)
+    
+    # Rename columns to safe names
+    names(goods) <- make.names(names(goods))
+    goods <- goods %>% rename_with(~ gsub("\\.", "_", .x))
+    
+    # Identify the Vehicle Population, KM Travelled, Average KM columns
+    veh_col <- grep("Vehicle_Population|Number_of_Vehicles|Vehicles_Licensed",
+                    names(goods), value = TRUE, ignore.case = TRUE)[1]
+    km_col  <- grep("Kilometre|Traveled|Travelled|Distance",
+                    names(goods), value = TRUE, ignore.case = TRUE)[1]
+    avg_col <- grep("Average",
+                    names(goods), value = TRUE, ignore.case = TRUE)[1]
+    
+    goods %>%
+      rename(Vehicle_Population = !!veh_col,
+             KM_Travelled_M     = !!km_col,
+             Average_KM         = !!avg_col) %>%
+      mutate(
+        base_veh = Vehicle_Population[Year == 2015],
+        base_km  = KM_Travelled_M[Year == 2015],
+        base_avg = Average_KM[Year == 2015],
+        Idx_Vehicle_Pop  = round(Vehicle_Population / base_veh, 4),
+        Idx_KM_Travelled = round(KM_Travelled_M     / base_km,  4),
+        Idx_Average_KM   = round(Average_KM         / base_avg, 4)
+      ) %>%
+      select(-starts_with("base_")) %>%
+      arrange(Year)
+    
+  }, error = function(e) {
+    cat("✗ Error loading THA17 goods vehicles:", conditionMessage(e), "\n")
+    cat("Using fallback freight vehicle data...\n")
+    
+    data.frame(
+      Year               = c(2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023),
+      Vehicle_Population = c(256300, 264700, 275800, 287900, 298500, 299200, 305100, 316400, 328700),
+      KM_Travelled_M     = c(5830,   6110,   6370,   6590,   6820,   5920,   6430,   6950,   7140),
+      Average_KM         = c(22749,  23082,  23098,  22890,  22850,  19787,  21075,  21967,  21718)
+    ) %>%
+      mutate(
+        Idx_Vehicle_Pop  = round(Vehicle_Population / Vehicle_Population[Year == 2015], 4),
+        Idx_KM_Travelled = round(KM_Travelled_M     / KM_Travelled_M[Year == 2015],    4),
+        Idx_Average_KM   = round(Average_KM         / Average_KM[Year == 2015],        4)
+      )
+  })
+  
+  # Aviation activity index — FETCH FROM CSO TAA04 (2016-2019) + TAA06 (2020-2024)
+  # Combines Passengers, Freight, Commercial Flights indexed to 2020=100
+  cat("Fetching aviation activity from CSO TAA04 + TAA06...\n")
+  
+  aviation_activity <- tryCatch({
+    taa04_raw <- cso_get_data("TAA04")
+    taa06_raw <- cso_get_data("TAA06")
+    
+    taa04_clean <- taa04_raw %>%
+      filter(Airports.in.Ireland == "All main airports",
+             Aircraft.Make       == "All makes of aircraft",
+             Direction           == "All directions",
+             Flight.Type         == "All flights") %>%
+      select(Statistic, `2016`:`2019`) %>%
+      pivot_longer(-Statistic, names_to = "Year", values_to = "Value") %>%
+      mutate(Year = as.integer(Year))
+    
+    taa06_clean <- taa06_raw %>%
+      filter(Airports.in.Ireland == "All main airports",
+             Country             == "All Countries",
+             Direction           == "All directions",
+             Flight.Type         == "All flights") %>%
+      select(Statistic, `2020`:`2024`) %>%
+      pivot_longer(-Statistic, names_to = "Year", values_to = "Value") %>%
+      mutate(Year = as.integer(Year))
+    
+    combined <- bind_rows(taa04_clean, taa06_clean) %>%
+      arrange(Statistic, Year)
+    
+    # Index to 2020=100
+    base_2020 <- combined %>%
+      filter(Year == 2020) %>%
+      select(Statistic, Base = Value)
+    
+    combined %>%
+      left_join(base_2020, by = "Statistic") %>%
+      mutate(Index = round(Value / Base * 100, 1)) %>%
+      select(Year, Statistic, Value, Index)
+    
+  }, error = function(e) {
+    cat("✗ Error loading TAA04/TAA06:", conditionMessage(e), "\n")
+    cat("Using fallback aviation activity data...\n")
+    
+    data.frame(
+      Year      = rep(2016:2024, each = 3),
+      Statistic = rep(c("Commercial Flights", "Freight", "Passengers"), 9),
+      Value     = c(
+        247.2, 147, 32741,   253.8, 164, 34439,   265.5, 157, 36521,
+        274.1, 146, 38053,    95.3, 139,  8294,    94.0, 161,  9133,
+        235.9, 160, 32518,   274.2, 170, 39186,   278.6, 190, 40983
+      )
+    ) %>%
+      group_by(Statistic) %>%
+      mutate(Index = round(Value / Value[Year == 2020] * 100, 1)) %>%
+      ungroup()
+  })
+  
+  # Aviation passengers by airport — FETCH FROM CSO TAA05
+  # Source: CSO Table TAA05 — Passengers at Irish Airports
+  cat("Fetching aviation passenger data from CSO TAA05...\n")
+  
+  aviation_passengers <- tryCatch({
+    taa05_raw <- cso_get_data("TAA05")
+    
+    taa05_raw %>%
+      pivot_longer(cols = -c(Statistic, Airports.in.Ireland),
+                   names_to = "Year", values_to = "Passengers") %>%
+      mutate(
+        Year  = as.integer(Year),
+        Group = case_when(
+          Airports.in.Ireland == "Dublin" ~ "Dublin",
+          Airports.in.Ireland == "Cork"   ~ "Cork",
+          TRUE                            ~ "Other"
+        )
+      ) %>%
+      group_by(Year, Group) %>%
+      summarise(Passengers = sum(Passengers, na.rm = TRUE), .groups = "drop") %>%
+      arrange(Year, Group)
+    
+  }, error = function(e) {
+    cat("✗ Error loading TAA05:", conditionMessage(e), "\n")
+    cat("Using fallback aviation data...\n")
+    
+    data.frame(
+      Year       = rep(c(2005,2006,2007,2008,2009,2010,2011,2012,2013,2014,
+                         2015,2016,2017,2018,2019,2020,2021,2022,2023,2024), each = 3),
+      Group      = rep(c("Cork","Dublin","Other"), 20),
+      Passengers = c(
+        2747190,18504759,4337028,  3023527,21265887,4857949,  3135502,23469661,4939079,
+        2957760,22993058,4722476,  2295637,19753907,3726803,  2162095,18444086,3636977,
+        2104985,18740836,3375025,  1933706,18729975,3277779,  1942053,19527136,3218534,
+        2054053,21421730,3155618,  2284574,25039381,3237793,  2484485,27937875,3372474,
+        2614665,29736741,3419097,  2742087,31476040,3096226,  2585466,32676251,2864456,
+        527014,  7267240, 531402,   329895, 10155905, 688888,  1895940,25889579,2226282,
+        2798024,33262941,3167303,  3068449,34623260,3342159
+      )
+    )
+  })
+  
+  # National GHG % by sector - FETCH FROM CSO BIIESGE03
+  # Source: CSO / EPA National Inventory Report
+  cat("Fetching National GHG % by sector from CSO BIIESGE03...\n")
+  
+  national_ghg_pct <- tryCatch({
+    biiesge03_raw <- cso_get_data("BIIESGE03")
+    
+    sectors_keep <- c("Agriculture", "Industry", "Transport", "Energy",
+                      "Waste", "Commercial Services", "Public Services", "Residential")
+    
+    biiesge03_raw %>%
+      filter(Common.Reporting.Format.Sector %in% sectors_keep) %>%
+      pivot_longer(
+        cols = -c(Statistic, Common.Reporting.Format.Sector),
+        names_to = "Year",
+        values_to = "Pct"
+      ) %>%
+      mutate(Year = as.integer(Year), Sector = Common.Reporting.Format.Sector) %>%
+      filter(Year >= 2018) %>%
+      select(Year, Sector, Pct) %>%
+      arrange(Year)
+    
+  }, error = function(e) {
+    cat("✗ Error loading BIIESGE03:", conditionMessage(e), "\n")
+    cat("Using fallback GHG data (EPA NIR)...\n")
+    
+    data.frame(
+      Year   = rep(c(2018, 2019, 2020, 2021, 2022, 2023), each = 8),
+      Sector = rep(c("Agriculture","Industry","Transport","Energy",
+                     "Waste","Commercial Services","Public Services","Residential"), 6),
+      Pct    = c(
+        34.8, 12.7, 20.0, 17.1, 1.5, 1.4, 1.1, 11.4,  # 2018
+        35.6, 12.9, 20.6, 15.6, 1.5, 1.4, 1.2, 11.3,  # 2019
+        37.4, 12.9, 18.1, 15.0, 1.5, 1.2, 1.2, 12.7,  # 2020
+        36.5, 13.0, 18.4, 16.9, 1.4, 1.3, 1.1, 11.4,  # 2021
+        36.9, 12.5, 19.9, 17.0, 1.5, 1.2, 1.2,  9.8,  # 2022
+        37.7, 12.7, 21.5, 14.3, 1.5, 1.3, 1.2,  9.7   # 2023
+      )
+    )
+  })
+  
+  # Commuting mode share - FETCH FROM CSO SAP2022T11T1ED (Census 2022)
+  # Source: CSO Census 2022 — Means of Travel to Work
+  cat("Fetching Census 2022 commuting mode share from CSO SAP2022T11T1ED...\n")
+  
+  commuting_mode <- tryCatch({
+    sap_raw <- cso_get_data("SAP2022T11T1ED")
+    
+    sap_raw %>%
+      filter(
+        CSO.Electoral.Divisions.2022 == "Ireland",
+        Statistic == "Usually resident by means of travel to work",
+        Means.of.Travel != "Total"
+      ) %>%
+      select(Mode = Means.of.Travel, Count = `2022`) %>%
+      filter(!is.na(Count)) %>%
+      mutate(Pct = round(100 * Count / sum(Count, na.rm = TRUE), 1)) %>%
+      arrange(desc(Count))
+    
+  }, error = function(e) {
+    cat("✗ Error loading SAP2022T11T1ED:", conditionMessage(e), "\n")
+    cat("Using fallback Census 2022 commuting data...\n")
+    
+    data.frame(
+      Mode  = c("Car Driver", "Work mainly at or from home", "On Foot",
+                "Not stated", "Van", "Bus, minibus or coach",
+                "Car passenger", "Train, DART or LUAS", "Bicycle",
+                "Other (incl. lorry)", "Motorcycle or scooter"),
+      Count = c(1199481, 259467, 178111, 163872, 146265, 119095,
+                84666,   60885,  60671,  12744,   8481),
+      Pct   = c(52.3, 11.3, 7.8, 7.1, 6.4, 5.2, 3.7, 2.7, 2.6, 0.6, 0.4)
+    )
+  })
+  
+  # Biofuel Blending Rate — HARDCODED from SEAI RTFO annual reports
+  # Biofuel data is not available in CSO PxStat. Source: SEAI Renewable Transport
+  # Fuel Obligation (RTFO) annual reports. CAP 2025 target: E10:B12 by 2025, E10:B20 by 2030.
+  biofuel_blend <- data.frame(
+    Year                = c(2018, 2019, 2020, 2021, 2022, 2023, 2024),
+    Biofuel_Blend_Pct   = c( 5.6,  5.7,  6.3,  7.8,  8.9, 10.1, 10.4),
+    RTFO_Obligation_Pct = c( 6.0,  6.0,  7.0,  8.0,  9.0, 10.0, 10.0)
+  )
+  
+  # ============================================================================
+  # IMPROVE TAB DATA FETCHES — verified live against CSO PxStat API
+  # ============================================================================
+  
+  # New/secondhand private cars by fuel type (TEM27) — monthly 2021-2026
+  cat("Fetching new/secondhand private cars by fuel type from CSO TEM27...\n")
+  new_cars_fuel <- tryCatch({
+    tem27_raw <- cso_get_data("TEM27")
+    tem27_raw %>%
+      filter(Licensing.Authority == "All licensing authorities") %>%
+      filter(Type.of.Fuel != "All fuel types") %>%
+      pivot_longer(
+        cols = -c(Statistic, Licensing.Authority, Type.of.Fuel),
+        names_to = "Month", values_to = "Count"
+      ) %>%
+      mutate(
+        Year = as.integer(substr(Month, 1, 4)),
+        Fuel = Type.of.Fuel,
+        Category = Statistic
+      ) %>%
+      filter(!is.na(Count)) %>%
+      group_by(Year, Category, Fuel) %>%
+      summarise(Count = sum(Count, na.rm = TRUE), .groups = "drop") %>%
+      arrange(Category, Fuel, Year)
+  }, error = function(e) {
+    cat("✗ TEM27 failed:", conditionMessage(e), "\n")
+    # Fallback: rough shares matching SIMI/ZEVI published figures
+    expand.grid(
+      Year = 2021:2024,
+      Category = c("New Private Cars", "Secondhand Private Cars"),
+      Fuel = c("Petrol", "Diesel", "Petrol and electric hybrid", "Electric",
+               "Petrol or Diesel plug-in hybrid electric", "Diesel and electric hybrid", "Other fuel types"),
+      stringsAsFactors = FALSE
+    ) %>%
+      mutate(Count = case_when(
+        Category == "New Private Cars" & Fuel == "Petrol"                               ~ c(33000,36000,35000,34000)[Year - 2020],
+        Category == "New Private Cars" & Fuel == "Diesel"                               ~ c(28000,25000,20000,16000)[Year - 2020],
+        Category == "New Private Cars" & Fuel == "Petrol and electric hybrid"           ~ c(15000,18000,21000,24000)[Year - 2020],
+        Category == "New Private Cars" & Fuel == "Electric"                             ~ c( 8646,15678,22783,16786)[Year - 2020],
+        Category == "New Private Cars" & Fuel == "Petrol or Diesel plug-in hybrid electric" ~ c( 6800, 9500,10500, 9500)[Year - 2020],
+        Category == "New Private Cars" & Fuel == "Diesel and electric hybrid"           ~ c(   50,  100,  150,  200)[Year - 2020],
+        Category == "New Private Cars" & Fuel == "Other fuel types"                     ~ c(  200,  250,  300,  350)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Petrol"                        ~ c(25000,28000,30000,31000)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Diesel"                        ~ c(36000,40000,38000,35000)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Petrol and electric hybrid"    ~ c( 6000, 7500, 9000,11000)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Electric"                      ~ c( 1200, 2400, 3800, 5200)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Petrol or Diesel plug-in hybrid electric" ~ c(  900, 1300, 1700, 2100)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Diesel and electric hybrid"    ~ c(   20,   40,   60,   80)[Year - 2020],
+        Category == "Secondhand Private Cars" & Fuel == "Other fuel types"              ~ c(  100,  120,  140,  160)[Year - 2020],
+        TRUE ~ 0
+      ))
+  })
+  
+  # Vehicles licensed for the first time — annual long trend (TEA01) 1997-2025
+  # NB: TEA01 uses uppercase STATISTIC column name (unlike most other CSO tables)
+  cat("Fetching long-run vehicles licensed from CSO TEA01...\n")
+  vehicles_licensed_long <- tryCatch({
+    tea01_raw <- cso_get_data("TEA01")
+    tea01_raw %>%
+      filter(Taxation.Class %in% c("New Private Cars",
+                                   "New Goods Vehicles",
+                                   "New Motor Cycles",
+                                   "Secondhand Private Cars")) %>%
+      pivot_longer(
+        cols = -c(STATISTIC, Taxation.Class),
+        names_to = "Year", values_to = "Count"
+      ) %>%
+      mutate(Year = as.integer(Year), Type = Taxation.Class) %>%
+      filter(!is.na(Count), Year >= 1997) %>%
+      select(Year, Type, Count) %>%
+      arrange(Type, Year)
+  }, error = function(e) {
+    cat("✗ TEA01 failed:", conditionMessage(e), "\n")
+    # Minimal fallback covering 1997-2024
+    data.frame(
+      Year = rep(1997:2024, 5),
+      Type = rep(c("All Vehicles", "New Private Cars", "New Goods Vehicles",
+                   "New Motor Cycles", "Secondhand Private Cars"), each = 28),
+      Count = NA_integer_
+    )
+  })
+  
+  # Private car fleet by fuel type — from THA17 (already fetched for car_indicators)
+  cat("Fetching private car fleet by fuel type from CSO THA17...\n")
+  car_fleet_fuel <- tryCatch({
+    tha17_raw <- cso_get_data("THA17")
+    tha17_raw %>%
+      filter(Statistic == "Vehicle Population") %>%
+      filter(Type.of.Vehicle == "Private cars") %>%
+      filter(County.of.Ownership == "Ireland") %>%
+      filter(Year.of.Registration == "All years") %>%
+      filter(Fuel.Type != "All fuel types") %>%
+      pivot_longer(
+        cols = -c(Statistic, Fuel.Type, Type.of.Vehicle,
+                  County.of.Ownership, Year.of.Registration),
+        names_to = "Year", values_to = "Count"
+      ) %>%
+      mutate(Year = as.integer(Year), Fuel = Fuel.Type) %>%
+      filter(!is.na(Count)) %>%
+      select(Year, Fuel, Count) %>%
+      arrange(Fuel, Year)
+  }, error = function(e) {
+    cat("✗ THA17 fleet-by-fuel failed:", conditionMessage(e), "\n")
+    data.frame(
+      Year = rep(2015:2023, 3),
+      Fuel = rep(c("Petrol", "Diesel", "Other fuel types"), each = 9),
+      Count = c(
+        820000, 790000, 770000, 755000, 745000, 740000, 735000, 725000, 710000,  # Petrol
+        1100000, 1170000, 1230000, 1280000, 1320000, 1345000, 1360000, 1365000, 1370000,  # Diesel
+        72000, 78000, 85000, 95000, 108000, 130000, 160000, 200000, 245000  # Other (EVs + hybrids)
+      )
+    )
+  })
+  
+  list(
+    vehicle_licensing = vehicle_licensing,
+    total_fleet = total_fleet,
+    public_transport = public_transport,
+    pt_bus_services  = pt_bus_services,
+    pt_rail_annual   = pt_rail_annual,
+    pt_luas_annual   = pt_luas_annual,
+    bike_share       = bike_share,
+    commute_journey_time = commute_journey_time,
+    new_cars_fuel    = new_cars_fuel,
+    vehicles_licensed_long = vehicles_licensed_long,
+    car_fleet_fuel   = car_fleet_fuel,
+    emissions = emissions,
+    energy_by_sector = energy_by_sector,
+    transport_subsectors = transport_subsectors,
+    modal_split = modal_split,
+    charging_points = charging_points,
+    cycling_infrastructure = cycling_infrastructure,
+    road_freight = road_freight,
+    freight_nst = freight_nst,
+    freight_main_use = freight_main_use,
+    remote_work = remote_work,
+    private_car_vkt = private_car_vkt,
+    biofuel_blend = biofuel_blend,
+    aviation_activity = aviation_activity,
+    aviation_passengers = aviation_passengers,
+    car_indicators = car_indicators,
+    freight_vehicle_indicators = freight_vehicle_indicators,
+    national_ghg_pct = national_ghg_pct,
+    commuting_mode = commuting_mode,
+    latest_year = 2024
+  )
+}
+
+
+
+# ============================================================================
+# UI DEFINITION
+# ============================================================================
+
+ui <- dashboardPage(
+  skin = "blue",
+  
+  dashboardHeader(
+    title = tags$span(
+      style = "font-family: Arial, sans-serif; font-weight: 700; font-size: 15px; letter-spacing: 0.2px;",
+      "Ireland Transport ASI"
+    ),
+    titleWidth = 280
+  ),
+  
+  dashboardSidebar(
+    width = 280,
+    sidebarMenu(
+      menuItem("Overview",          tabName = "overview", icon = icon("gauge-high")),
+      menuItem("Setting the Scene", tabName = "scene",    icon = icon("map")),
+      menuItem("AVOID",             tabName = "avoid",    icon = icon("ban")),
+      menuItem("SHIFT",             tabName = "shift",    icon = icon("right-left")),
+      menuItem("IMPROVE",           tabName = "improve",  icon = icon("bolt")),
+      menuItem("Data Sources",      tabName = "sources",  icon = icon("database"))
+    ),
+    
+    div(class = "sidebar-footer",
+        hr(),
+        p("Avoid — Shift — Improve", style = "font-size:11px; text-transform:uppercase; letter-spacing:1px;"),
+        p("Data period: 2015–2024",  style = "font-size:11px;"),
+        p("Source: CSO Ireland",     style = "font-size:10px; opacity:0.7;")
+    )
+  ),
+  
+  dashboardBody(
+    tags$head(
+      tags$link(
+        rel  = "stylesheet",
+        href = "https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@300;400;600;700&display=swap"
+      ),
+      tags$style(HTML("
+
+        /* ── BASE ─────────────────────────────────────────────── */
+        body, .wrapper {
+          font-family: 'Source Sans Pro', Arial, sans-serif !important;
+          background-color: #f0f2f5 !important;
+          color: #1f1f1f;
+        }
+
+        /* ── HEADER ───────────────────────────────────────────── */
+        .main-header .logo,
+        .main-header .navbar {
+          background-color: #405381 !important;
+          border-bottom: 3px solid #00959f !important;
+        }
+        .main-header .logo {
+          color: #ffffff !important;
+          font-family: 'Source Sans Pro', Arial, sans-serif !important;
+        }
+        .main-header .navbar .sidebar-toggle,
+        .main-header .navbar .sidebar-toggle:hover {
+          color: #ffffff !important;
+        }
+
+        /* ── SIDEBAR ──────────────────────────────────────────── */
+        .main-sidebar, .left-side {
+          background-color: #35456b !important;
+        }
+        .sidebar-menu > li > a {
+          font-family: 'Source Sans Pro', Arial, sans-serif;
+          font-size: 13.5px;
+          font-weight: 400;
+          color: #c8d0e0 !important;
+          border-left: 3px solid transparent;
+          padding: 11px 15px 11px 18px;
+        }
+        .sidebar-menu > li > a:hover,
+        .sidebar-menu > li.active > a {
+          color: #ffffff !important;
+          background-color: #405381 !important;
+          border-left-color: #00959f !important;
+        }
+        .sidebar-menu > li > a .fa {
+          color: #8693b3 !important;
+          width: 20px;
+        }
+        .sidebar-menu > li.active > a .fa,
+        .sidebar-menu > li > a:hover .fa {
+          color: #5bc1a5 !important;
+        }
+        .sidebar-footer {
+          padding: 0 15px 15px;
+          color: #8693b3;
+          font-size: 11px;
+          line-height: 1.7;
+        }
+        .sidebar-footer hr {
+          border-color: #405381;
+          margin: 10px 0;
+        }
+        .sidebar-menu li:not(.header) > a:first-child {
+          border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+
+        /* ── CONTENT AREA ─────────────────────────────────────── */
+        .content-wrapper {
+          background-color: #f0f2f5 !important;
+          padding: 20px 24px !important;
+        }
+
+        /* ── HEADINGS ─────────────────────────────────────────── */
+        h2 {
+          font-family: 'Source Sans Pro', Arial, sans-serif;
+          font-size: 22px;
+          font-weight: 700;
+          color: #405381;
+          margin-top: 0;
+          margin-bottom: 18px;
+          border-bottom: 2px solid #00959f;
+          padding-bottom: 8px;
+        }
+        h3 {
+          font-size: 15px;
+          font-weight: 600;
+          color: #35456b;
+        }
+        h4 {
+          font-size: 13px;
+          font-weight: 600;
+          color: #405381;
+        }
+        p {
+          font-size: 13.5px;
+          color: #444;
+          line-height: 1.6;
+        }
+
+        /* ── BOXES ────────────────────────────────────────────── */
+        .box {
+          background-color: #ffffff !important;
+          border: none !important;
+          border-radius: 4px !important;
+          box-shadow: 0 1px 4px rgba(64,83,129,0.12), 0 0 0 1px rgba(64,83,129,0.06) !important;
+          margin-bottom: 20px;
+        }
+        .box-header {
+          background-color: #405381 !important;
+          border-bottom: none !important;
+          border-radius: 4px 4px 0 0 !important;
+          padding: 10px 16px !important;
+        }
+        .box-header .box-title {
+          font-family: 'Source Sans Pro', Arial, sans-serif !important;
+          font-size: 13px !important;
+          font-weight: 600 !important;
+          color: #ffffff !important;
+          letter-spacing: 0.2px;
+        }
+        .box-body {
+          padding: 16px !important;
+          color: #1f1f1f;
+        }
+        /* Status-colour box headers */
+        .box.box-solid.box-primary  > .box-header { background-color: #405381 !important; }
+        .box.box-solid.box-success  > .box-header { background-color: #00959f !important; }
+        .box.box-solid.box-warning  > .box-header { background-color: #e6861a !important; }
+        .box.box-solid.box-danger   > .box-header { background-color: #c0392b !important; }
+        .box.box-solid.box-info     > .box-header { background-color: #2980b9 !important; }
+        .box.box-solid { border-top: none !important; }
+
+        /* ── INFO BOXES (KPIs) ────────────────────────────────── */
+        .info-box {
+          min-height: 88px;
+          background-color: #ffffff !important;
+          border-radius: 4px !important;
+          box-shadow: 0 1px 4px rgba(64,83,129,0.12) !important;
+          border-left: 4px solid #00959f !important;
+          border-top: none; border-right: none; border-bottom: none;
+        }
+        .info-box-icon {
+          height: 88px !important;
+          line-height: 88px !important;
+          border-radius: 4px 0 0 4px !important;
+          font-size: 32px !important;
+        }
+        .info-box-content { padding-top: 12px !important; }
+        .info-box-text {
+          font-family: 'Source Sans Pro', Arial, sans-serif;
+          font-size: 11px !important;
+          font-weight: 700 !important;
+          letter-spacing: 0.8px;
+          text-transform: uppercase;
+          color: #8693b3 !important;
+        }
+        .info-box-number {
+          font-family: 'Source Sans Pro', Arial, sans-serif;
+          font-size: 26px !important;
+          font-weight: 700 !important;
+          color: #405381 !important;
+        }
+
+        /* ── DATA SOURCE NOTES ────────────────────────────────── */
+        .data-note {
+          background-color: #f7f9fc;
+          border-left: 3px solid #00959f;
+          padding: 9px 13px;
+          margin-top: 12px;
+          border-radius: 0 3px 3px 0;
+          font-size: 11px;
+          color: #666;
+          line-height: 1.5;
+        }
+        .data-note b { color: #405381; }
+
+        /* ── ASI BOX ──────────────────────────────────────────── */
+        .asi-box {
+          background-color: #f7f9fc;
+          border: 1px solid #dce3f0;
+          padding: 18px;
+          border-radius: 4px;
+          margin: 10px 0;
+        }
+
+        /* ── TABLES ───────────────────────────────────────────── */
+        .table > thead > tr > th {
+          background-color: #405381;
+          color: #ffffff;
+          font-size: 12px;
+          font-weight: 600;
+          letter-spacing: 0.4px;
+          text-transform: uppercase;
+          border-bottom: none !important;
+        }
+        .table > tbody > tr > td {
+          border-top: 1px solid #e8ecf4 !important;
+          color: #1f1f1f;
+          font-size: 13px;
+        }
+        .table-striped > tbody > tr:nth-of-type(odd) {
+          background-color: #f7f9fc !important;
+        }
+        .table-hover > tbody > tr:hover {
+          background-color: #eef1f8 !important;
+        }
+
+        /* ── HR DIVIDERS ──────────────────────────────────────── */
+        hr { border-color: #dce3f0; }
+
+      "))
+    ),
+    
+    tabItems(
+      # ====================================================================
+      # OVERVIEW TAB
+      # ====================================================================
+      tabItem(
+        tabName = "overview",
+        h2("Climate Action Plan 2025 - Transport Sector Overview"),
+        
+        # ---- Emissions vs target chart ----
+        fluidRow(
+          box(
+            title = "Transport Emissions vs Climate Action Plan 2030 Target Pathway",
+            status = "danger",
+            solidHeader = TRUE,
+            width = 8,
+            plotlyOutput("overview_emissions_target_plot", height = 350),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: EPA National GHG Inventory; CAP 2025 Chapter 14 target pathway"),
+          ),
+          box(
+            title = "Climate Action Plan 2025 — Transport Targets",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 4,
+            div(style = "padding: 15px;",
+                h4("2030 Targets"),
+                tags$ul(
+                  tags$li(tags$b("50%"), " reduction in transport emissions by 2030 (from 12.3 to 6.1 MtCO\u2082eq)"),
+                  tags$li(tags$b("20%"), " reduction in total VKT relative to business-as-usual"),
+                  tags$li(tags$b("50%"), " reduction in fuel usage"),
+                  tags$li("Significant increases to sustainable transport modal share")
+                ),
+                hr(),
+                h4("Sectoral Carbon Budgets"),
+                tags$ul(
+                  tags$li(tags$b("54"), " MtCO\u2082eq for 2021\u20132025 (1st budget)"),
+                  tags$li(tags$b("37"), " MtCO\u2082eq for 2026\u20132030 (2nd budget)")
+                ),
+                hr(),
+                h4("Primary Abatement Sources"),
+                p("Fleet electrification and biofuels are expected to provide the greatest share of emissions abatement in the medium term.",
+                  style = "font-size: 12px;")
+            )
+          )
+        ),
+        
+        # ---- CAP 2025 narrative box ----
+        fluidRow(
+          box(
+            title = "Current Status & Policy Pathway (CAP 2025 Chapter 14)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 20px;",
+                fluidRow(
+                  column(6,
+                         h3("Current Status & Trajectory"),
+                         p(tags$b("Emissions status: "), "Transport emissions increased by ", tags$b("0.3% in 2023"),
+                           " over 2022, effectively plateauing. Transport accounts for ",
+                           tags$b("19.5%"), " of economy-wide emissions."),
+                         tags$ul(
+                           tags$li("Transport emissions fell ", tags$b("4.2%"), " between 2018 and 2023"),
+                           tags$li(tags$b("64.1%"), " of the 1st sectoral carbon budget was expended in 2021\u20132023 (34.64 of 54 MtCO\u2082eq)"),
+                           tags$li("Annual ", tags$b("12.4% decrease"), " required in 2024 and 2025 to stay within the 1st carbon budget"),
+                           tags$li("EPA 2024 projections expect transport emissions to reduce by ", tags$b("29%"), " of 2018 levels by 2030 \u2014 short of the 50% target")
+                         ),
+                         hr(),
+                         h4("Context of 2023 Plateau"),
+                         p("2023 emissions were effectively static in the context of:"),
+                         tags$ul(
+                           tags$li("GNI* growth of ", tags$b("5%")),
+                           tags$li("Employment growth of ", tags$b("3.5%")),
+                           tags$li("Population growth of almost ", tags$b("2%")),
+                           tags$li("National vehicle fleet increase of ", tags$b("3%"))
+                         ),
+                         p(tags$i("This suggests some decoupling of transport emissions from economic and population growth."))
+                  ),
+                  column(6,
+                         h3("Policy Pathway"),
+                         h4("2025 Actions (unchanged from CAP24)"),
+                         p("CAP 2025 retained the key performance indicators from Table 15.5 of CAP24 without change. Actions reflect continuation of existing policy while the Department of Transport recalibrates the pathway."),
+                         hr(),
+                         h4("Recalibration in Progress"),
+                         p("The Department of Transport is engaging with the NTA, TII and wider stakeholders to:"),
+                         tags$ul(
+                           tags$li("Recalibrate existing emissions modelling"),
+                           tags$li("Develop refined proposals for amplified or additional decarbonisation policies"),
+                           tags$li("Set national targets for a renewed policy pathway"),
+                           tags$li("Determine whether the transport sector can help address cross-sectoral 'unallocated savings' for the 2026\u20132030 period")
+                         ),
+                         hr(),
+                         h4("2023 Milestones"),
+                         tags$ul(
+                           tags$li("PSO public transport passenger numbers exceeded ", tags$b("300 million"), " for the first time (+24% vs 2022)"),
+                           tags$li(tags$b("139,412"), " electric vehicles on the road by end-August 2024"),
+                           tags$li("Connecting Ireland rural routes recorded ", tags$b("4.7M"), " journeys in 2023 (+70% vs 2022)")
+                         )
+                  )
+                )
+            )
+          )
+        )
+      ),
+      
+      # ====================================================================
+      # SETTING THE SCENE TAB (CLEANED)
+      # ====================================================================
+      tabItem(
+        tabName = "scene",
+        h2("Setting the Scene: Ireland's Energy Demand by Sector"),
+        
+        
+        fluidRow(
+          box(
+            title = "Final Energy Consumption — % of National Total by Sector (2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("scene_energy_trend", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: SEAI SEI06 — Energy in Ireland"),
+          ),
+          box(
+            title = "Final Energy Consumption by Sector — Treemap (2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("scene_energy_treemap", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: SEAI SEI06 — Energy in Ireland"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Transport Sub-Sectors — % of Transport Energy vs % of National Energy (2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("scene_transport_grouped", height = 350),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: SEAI SEI06 — Energy in Ireland (transport sub-sectors)"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "National GHG Emissions by Sector — % Share (2018–2023)",
+            status = "danger",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("scene_ghg_sectors", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO BIIESGE01 — GHG emissions by NACE Rev.2 sector"),
+          ),
+          box(
+            title = "Means of Travel to Work — Census 2022",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("scene_commuting", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO SAP2022T11T1ED — Census 2022 means of travel to work"),
+          )
+        )
+      ),
+      
+      # ====================================================================
+      # AVOID TAB
+      # ====================================================================
+      tabItem(
+        tabName = "avoid",
+        h2("AVOID: Reducing Travel Demand"),
+        p("Minimising the need for motorised travel through planning, remote work and digital alternatives"),
+        
+        fluidRow(
+          box(
+            title = "AVOID Strategies & Indicators",
+            status = "danger",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 15px;",
+                fluidRow(
+                  column(6,
+                         h4("Key Strategies:"),
+                         p(tags$b("Reduce the need to travel")),
+                         tags$ul(
+                           tags$li("Encourage remote work options to reduce the need for commuting"),
+                           tags$li("Develop communities where shopping, work and leisure are accessible within a 15-minute walk or cycle"),
+                           tags$li("Congestion charges and parking management to incentivise alternatives to car use")
+                         )
+                  ),
+                  column(6,
+                         h4("Indicators Tracked:"),
+                         tags$ul(
+                           tags$li(tags$b("Private car demand: "), "VKT, average km per car and indexed trends"),
+                           tags$li(tags$b("Remote working: "), "Share of workforce working from home"),
+                           tags$li(tags$b("Road freight: "), "Fleet, activity by goods type and main use"),
+                           tags$li(tags$b("Aviation: "), "Passengers, freight and commercial flights")
+                         )
+                  )
+                )
+            )
+          )
+        ),
+        
+        # ─────────── 1. PRIVATE CAR DEMAND ───────────
+        h3("1. Private Car Demand",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Private Car VKT — Actual vs CAP 2025 Target Pathway",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("avoid_vkt_total_plot", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA10 — Road Traffic Volumes; CAP 2025 Ch.14 target pathway"),
+          ),
+          box(
+            title = "Average Kilometres per Private Car",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("avoid_vkt_average_plot", height = 350),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA10 — Road Traffic Volumes"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Private Car VKT — % Change from 2019 Baseline",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("avoid_vkt_change_plot", height = 300),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA10 — Road Traffic Volumes"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Private Car Indicators — Indexed Trends (2015 = 1)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 8,
+            plotlyOutput("avoid_car_index_plot", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA17 (vehicle and km data) + PEA08 (population estimates)"),
+          ),
+          box(
+            title = "Derived Indicators (latest)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 4,
+            div(style = "padding: 15px;",
+                h4("Cars per 1,000 population:"),
+                tableOutput("avoid_car_kpi_table"),
+                hr(),
+                h4("km per capita:"),
+                tableOutput("avoid_km_kpi_table"),
+                hr(),
+                p(tags$i("Source: CSO THA17 + PEA08"), style = "font-size: 11px;")
+            )
+          )
+        ),
+        
+        # ─────────── 2. REMOTE WORKING ───────────
+        h3("2. Remote Working",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Remote Working Prevalence",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("avoid_remote_work_plot", height = 340),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO QES20 — Persons in employment, extent working at home"),
+          )
+        ),
+        
+        # ─────────── 3. ROAD FREIGHT ───────────
+        h3("3. Road Freight",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Freight Vehicle Fleet — Indexed Trends (2015 = 1)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("avoid_freight_vehicle_index", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA17 — Vehicle Licensing Statistics (goods vehicles)"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Road Freight Tonne-Kilometres — All NST 2007 Goods",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("avoid_freight_tonne_km_bar", height = 360),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TFQ01 — Road Freight Transport Activity"),
+          ),
+          box(
+            title = "Tonne-Kilometres by NST 2007 Goods Group",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("avoid_freight_nst_line", height = 360),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TFA19 — Road Freight by Type of Goods (NST 2007)"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Tonne-Kilometres by Main Use of Vehicle",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("avoid_freight_main_use_stack", height = 480),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TFA01 — Road Freight by Main Use of Vehicle"),
+          )
+        ),
+        
+        # ─────────── 4. AVIATION ───────────
+        h3("4. Aviation",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Aviation Activity — Passengers, Freight & Commercial Flights (Index 2020 = 100)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("avoid_aviation_index", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TAA04 (2016–2019) + TAA06 (2020–2024)"),
+          ),
+          box(
+            title = "Aviation Freight at Irish Airports (2016–2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("avoid_aviation_freight", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TAA04 (2016–2019) + TAA06 (2020–2024)"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Passengers at Irish Airports — Dublin, Cork & Other (2005–2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("scene_aviation_line", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TAA05 — Passengers at Irish Airports"),
+          )
+        )
+      ),
+      
+      # ====================================================================
+      # SHIFT TAB
+      # ====================================================================
+      tabItem(
+        tabName = "shift",
+        h2("SHIFT: Moving to Sustainable Transport"),
+        p("Transitioning from private cars to public transport, active travel and shared mobility"),
+        
+        fluidRow(
+          box(
+            title = "SHIFT Strategies & Indicators",
+            status = "info",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 15px;",
+                fluidRow(
+                  column(6,
+                         h4("Key Strategies:"),
+                         p(tags$b("Move to more sustainable modes of travel")),
+                         tags$ul(
+                           tags$li("Invest in and improve public transport systems to make them more attractive than private cars"),
+                           tags$li("Expand and enhance cycling and walking infrastructure"),
+                           tags$li("Cycle-to-work schemes and subsidies for public transport")
+                         )
+                  ),
+                  column(6,
+                         h4("Indicators Tracked:"),
+                         tags$ul(
+                           tags$li(tags$b("Bus: "), "Passenger journeys by service type (TOA16)"),
+                           tags$li(tags$b("Rail: "), "Annual passenger journeys (THA24)"),
+                           tags$li(tags$b("Luas: "), "Red and Green line journeys (TOA11)"),
+                           tags$li(tags$b("Active travel: "), "Bike share journeys (TOA08 / TOA22)"),
+                           tags$li(tags$b("Census 2022: "), "Commute mode and journey time")
+                         )
+                  )
+                )
+            )
+          )
+        ),
+        
+        # ─────────── 1. PUBLIC TRANSPORT VOLUME ───────────
+        h3("1. Public Transport Volume",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Bus Passenger Services — by Service Type (2011–2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("shift_bus_services_plot", height = 420),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TOA16 — Summary of scheduled bus passenger services"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Rail Passenger Journeys (2019–2023)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("shift_rail_plot", height = 360),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA24 — Passenger Journeys by Public Transport"),
+          ),
+          box(
+            title = "Luas Passenger Numbers — Red & Green Line (2018–2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("shift_luas_plot", height = 360),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TOA11 — Luas Passenger Numbers"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Public Transport Journeys Indexed to 2019 = 100 (Bus & Luas)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("shift_pt_indexed_plot", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: Derived from CSO TOA16 (bus) and TOA11 (Luas)"),
+          )
+        ),
+        
+        # ─────────── 2. ACTIVE TRAVEL ───────────
+        h3("2. Active Travel & Shared Mobility",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Bike Share Journeys — Dublin & Regional Cities",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("shift_bike_share_plot", height = 420),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TOA08 (Dublin Bikes) + TOA22 (Cork, Galway, Limerick, Waterford)"),
+          )
+        ),
+        
+        # ─────────── 3. CENSUS COMMUTING ───────────
+        h3("3. Census 2022 Commuting Patterns",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Commute Mode Share (Census 2022)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("shift_commute_mode_plot", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO SAP2022T11T1ED — Census 2022 means of travel to work"),
+          ),
+          box(
+            title = "Commute Journey Time Distribution (Census 2022)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("shift_commute_time_plot", height = 380),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO SAP2022T11T3ED — Census 2022 journey time to work"),
+          )
+        )
+      ),
+      
+      # ====================================================================
+      # IMPROVE TAB
+      # ====================================================================
+      tabItem(
+        tabName = "improve",
+        h2("IMPROVE: Cleaner Vehicles & Technologies"),
+        p("Transitioning to electric vehicles, alternative fuels and improving efficiency"),
+        
+        fluidRow(
+          box(
+            title = "IMPROVE Strategies & Indicators",
+            status = "success",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 15px;",
+                fluidRow(
+                  column(6,
+                         h4("Key Strategies:"),
+                         p(tags$b("Make existing transport modes cleaner")),
+                         tags$ul(
+                           tags$li("Incentivise the purchase of electric vehicles and expand charging infrastructure"),
+                           tags$li("Increase biofuel blending and invest in alternative fuels"),
+                           tags$li("Encourage more fuel-efficient vehicles and energy-efficient technologies")
+                         )
+                  ),
+                  column(6,
+                         h4("Indicators Tracked:"),
+                         tags$ul(
+                           tags$li(tags$b("New car registrations: "), "By fuel type (TEM27)"),
+                           tags$li(tags$b("EV share: "), "% of new private cars licensed"),
+                           tags$li(tags$b("Secondhand imports: "), "New vs secondhand by fuel type (TEM27)"),
+                           tags$li(tags$b("Long trend: "), "Annual vehicles licensed 1997-2024 (TEA01)"),
+                           tags$li(tags$b("Fleet composition: "), "Private car stock by fuel (THA17)"),
+                           tags$li(tags$b("Biofuels: "), "SEAI RTFO blending rate vs CAP target")
+                         )
+                  )
+                )
+            )
+          )
+        ),
+        
+        # ─────────── 1. EV ADOPTION (NEW CAR MARKET) ───────────
+        h3("1. EV Adoption — New Car Market",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "New Private Cars Licensed by Fuel Type (2021–2025)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("improve_new_cars_fuel_plot", height = 420),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TEM27 — New and Secondhand Private Cars by Fuel Type"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "EV Share of New Private Car Registrations",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("improve_ev_share_plot", height = 360),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: Derived from CSO TEM27"),
+          ),
+          box(
+            title = "New vs Secondhand Private Cars by Fuel Type",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("improve_new_vs_secondhand_plot", height = 360),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TEM27 — New and Secondhand Private Cars by Fuel Type"),
+          )
+        ),
+        
+        # ─────────── 2. FLEET & LONG TREND ───────────
+        h3("2. Fleet Composition & Long-Run Trend",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Vehicles Licensed for the First Time (1997–2024)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("improve_long_trend_plot", height = 400),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO TEA01 — Vehicles Licensed for the First Time (annual)"),
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Private Car Fleet Composition by Fuel Type (2015–2023)",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("improve_fleet_fuel_plot", height = 400),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: CSO THA17 — Private car fleet by fuel type"),
+          )
+        ),
+        
+        # ─────────── 3. BIOFUELS ───────────
+        h3("3. Renewable Transport Fuels",
+           style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
+        
+        fluidRow(
+          box(
+            title = "Biofuel Blending Rate vs RTFO Obligation & CAP 2030 Target",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("improve_biofuel_plot", height = 400),
+            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
+                "Source: SEAI Renewable Transport Fuel Obligation (RTFO) annual reports"),
+          )
+        )
+      ),
+      
+      # ====================================================================
+      # DATA SOURCES TAB
+      # ====================================================================
+      tabItem(
+        tabName = "sources",
+        h2("Data Sources & Methodology"),
+        
+        fluidRow(
+          box(
+            title = "CSO Tables Used in this Dashboard",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 20px;",
+                p("All tables below are pulled live from the CSO PxStat API via the",
+                  tags$code("csodata"), "R package at app startup, with hardcoded fallback data where the API call fails."),
+                
+                h3("Setting the Scene"),
+                tags$ul(
+                  tags$li(tags$b("SEI06"), " — SEAI Energy in Ireland: final energy consumption by sector (transport vs residential vs industry etc.). Note: SEAI data, not CSO — hardcoded from the published SEAI SEI06 release."),
+                  tags$li(tags$b("Transport sub-sector energy"), " — SEAI Energy in Ireland, road private car / road freight / international aviation breakdown."),
+                  tags$li(tags$b("BIIESGE01"), " — National greenhouse gas emissions by NACE Rev.2 sector, used for the stacked GHG share chart."),
+                  tags$li(tags$b("SAP2022T11T1ED"), " — Census 2022 usually resident by means of travel to work, school, college or childcare."),
+                  tags$li(tags$b("TAA05"), " — Passengers at Irish Airports (Dublin, Cork and other airports, 2005–2024).")
+                ),
+                
+                h3("AVOID Pillar"),
+                tags$ul(
+                  tags$li(tags$b("THA10"), " — Road Traffic Volumes by Type of Vehicle. Total private car VKT in billion km, average km per car, and change vs 2019 baseline."),
+                  tags$li(tags$b("THA17"), " — Vehicle Licensing Statistics, used for private car fleet by fuel type and the indexed trends chart (vehicle population, km travelled, average km)."),
+                  tags$li(tags$b("PEA08"), " — Population Estimates, combined with THA17 to derive cars per 1,000 population and km per capita."),
+                  tags$li(tags$b("QES20"), " — Labour Force Survey: persons in employment, extent working at home. Drives the remote working prevalence chart."),
+                  tags$li(tags$b("TFQ01"), " — Road Freight Transport Activity: tonne-kilometres, all NST 2007 goods, all business activities."),
+                  tags$li(tags$b("TFA19"), " — Annual Road Freight by Type of Goods (NST 2007 groups). Source for the NST goods breakdown line chart."),
+                  tags$li(tags$b("TFA01"), " — Annual Road Freight by Main Use of Vehicle. Source for the main use stacked bar chart."),
+                  tags$li(tags$b("TAA04"), " — Aviation Activity at Irish Airports 2016–2019 (passengers, freight, commercial flights)."),
+                  tags$li(tags$b("TAA06"), " — Aviation Activity at Irish Airports 2020–2024 (passengers, freight, commercial flights). Combined with TAA04 for the indexed aviation chart.")
+                ),
+                
+                h3("SHIFT Pillar"),
+                tags$ul(
+                  tags$li(tags$b("TOA16"), " — Summary of scheduled bus passenger services, 2011–2024. Breakdown by Dublin city services, provincial city and town services, other scheduled services, and school transport scheme."),
+                  tags$li(tags$b("THA24"), " — Annual Passenger Journeys by Public Transport (2019–2023). Covers Dublin Metro Bus, Bus excluding Dublin Metro, and Rail."),
+                  tags$li(tags$b("TOA11"), " — Luas Passenger Numbers, monthly 2018–2024, aggregated to annual with Red and Green line breakdown."),
+                  tags$li(tags$b("TOA08"), " — Bicycle Sharing Scheme data for Dublin (Dublin Bikes), 2017–2024."),
+                  tags$li(tags$b("TOA22"), " — Bicycle Sharing Scheme data for Cork, Galway, Limerick and Waterford, 2015–2025."),
+                  tags$li(tags$b("SAP2022T11T3ED"), " — Census 2022 Population aged 5 years and over by Journey Time to Work, School or College.")
+                ),
+                
+                h3("IMPROVE Pillar"),
+                tags$ul(
+                  tags$li(tags$b("TEM27"), " — New and Secondhand Private Cars Licensed for the First Time by fuel type, monthly 2021–2026. Eight fuel categories including petrol, diesel, electric, petrol-hybrid, diesel-hybrid, and plug-in hybrid."),
+                  tags$li(tags$b("TEA01"), " — Vehicles Licensed for the First Time, annual 1997–2025. Used for the 28-year long-trend line chart by vehicle class (new private cars, new goods vehicles, new motorcycles, secondhand private cars)."),
+                  tags$li(tags$b("THA17"), " — Private car fleet composition (stock) by fuel type, used to show how slowly the existing fleet turns over compared to new sales."),
+                  tags$li(tags$b("SEAI RTFO reports"), " — Renewable Transport Fuel Obligation annual reports. Biofuel blending rate data is not available in CSO PxStat; figures are hardcoded from SEAI reports with a clear provenance note.")
+                )
+            )
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Other Data Sources",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 20px;",
+                h3("Environmental Protection Agency (EPA)"),
+                p("Transport sector greenhouse gas emissions (MtCO₂eq) from the",
+                  tags$a(href = "https://www.epa.ie/our-services/monitoring--assessment/climate-change/ghg/",
+                         "EPA National Inventory Report", target = "_blank"),
+                  ". Used for the Overview tab emissions vs CAP 2030 target pathway chart."),
+                
+                h3("SEAI — Sustainable Energy Authority of Ireland"),
+                tags$ul(
+                  tags$li(tags$b("SEI06 Energy in Ireland"), " — final energy consumption by sector and sub-sector."),
+                  tags$li(tags$b("Renewable Transport Fuel Obligation (RTFO)"), " annual reports — biofuel blending rates and compliance.")
+                ),
+                
+                h3("Department of Transport / DECC"),
+                p(tags$a(href = "https://www.gov.ie/en/publication/climate-action-plan/",
+                         "Climate Action Plan 2025", target = "_blank"),
+                  " — target pathways, carbon budgets, and ASI framework narrative.")
+            )
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Data Access & Methodology",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 20px;",
+                h3("CSO PxStat"),
+                tags$ul(
+                  tags$li(tags$b("Web portal: "),
+                          tags$a(href = "https://data.cso.ie", "data.cso.ie", target = "_blank")),
+                  tags$li(tags$b("R package: "), tags$code("install.packages('csodata')")),
+                  tags$li(tags$b("REST API: "),
+                          "https://ws.cso.ie/public/api.restful/PxStat.Data.Cube_API.ReadDataset/{TABLE}/JSON-stat/2.0/en")
+                ),
+                
+                h3("CAP 2025 Target Pathways"),
+                tags$ul(
+                  tags$li(tags$b("Transport emissions"), " — linear pathway from 2018 baseline (12.3 MtCO₂eq) to 2030 target (6.1 MtCO₂eq)."),
+                  tags$li(tags$b("Private car VKT"), " — linear pathway from 2018 baseline (35.96 billion km) to 2030 target (28.77 billion km, a 20% reduction)."),
+                  tags$li(tags$b("Biofuels"), " — E10:B12 by 2025, E10:B20 by 2030 (roughly 14% blending rate).")
+                ),
+                
+                h3("Important Notes"),
+                tags$ul(
+                  tags$li(tags$b("No projections or forecasts"), " — all charts show observed data. Target lines are drawn from published CAP 2025 policy targets only."),
+                  tags$li(tags$b("COVID-19 impact"), " — 2020–2021 figures are materially affected by pandemic restrictions and should be read as outlier years."),
+                  tags$li(tags$b("Partial 2026 data"), " — TEM27 (new car licensing) publishes monthly and currently covers January–March 2026, so the 2026 bar is partial."),
+                  tags$li(tags$b("THA24 rail coverage"), " — rail data only begins in 2020 in THA24, so rail is excluded from the 2019-indexed chart."),
+                  tags$li(tags$b("NCT odometer basis"), " — THA10 and THA17 kilometre figures are derived from NCT odometer readings combined with TII traffic count data.")
+                )
+            )
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "About the ASI Framework",
+            status = "info",
+            solidHeader = TRUE,
+            width = 12,
+            div(style = "padding: 20px;",
+                h3("Avoid–Shift–Improve: Ireland's Transport Decarbonisation Strategy"),
+                p("The ASI framework is referenced directly in Climate Action Plan 2025 section 14.2.3 and provides the structural logic for this dashboard:"),
+                
+                fluidRow(
+                  column(4,
+                         div(class = "asi-box",
+                             h4("AVOID", style = "color: #d32f2f;"),
+                             p(tags$b("Reduce travel demand through:")),
+                             tags$ul(
+                               tags$li("Remote working"),
+                               tags$li("Compact urban development"),
+                               tags$li("15-minute neighbourhoods"),
+                               tags$li("Digital services")
+                             )
+                         )
+                  ),
+                  column(4,
+                         div(class = "asi-box",
+                             h4("SHIFT", style = "color: #f57c00;"),
+                             p(tags$b("Move to sustainable modes:")),
+                             tags$ul(
+                               tags$li("Public transport expansion"),
+                               tags$li("Cycling infrastructure"),
+                               tags$li("Pedestrian improvements"),
+                               tags$li("Integrated mobility")
+                             )
+                         )
+                  ),
+                  column(4,
+                         div(class = "asi-box",
+                             h4("IMPROVE", style = "color: #388e3c;"),
+                             p(tags$b("Cleaner technology:")),
+                             tags$ul(
+                               tags$li("Electric vehicle rollout"),
+                               tags$li("Charging infrastructure"),
+                               tags$li("Alternative fuels"),
+                               tags$li("Efficiency standards")
+                             )
+                         )
+                  )
+                ),
+                
+                hr(),
+                
+                h4("Climate Action Plan 2025 — Transport Sector Targets:"),
+                tags$ul(
+                  tags$li(tags$b("50% reduction"), " in transport emissions by 2030 (from 12.3 MtCO₂eq in 2018 to 6.1 MtCO₂eq)."),
+                  tags$li(tags$b("20% reduction"), " in total private car vehicle kilometres travelled by 2030, relative to business-as-usual."),
+                  tags$li(tags$b("50% reduction"), " in fuel usage."),
+                  tags$li(tags$b("First sectoral carbon budget 2021–2025"), " = 54 MtCO₂eq; 64.1% expended by end 2023."),
+                  tags$li(tags$b("Second sectoral carbon budget 2026–2030"), " = 37 MtCO₂eq.")
+                ),
+                
+                p(tags$i("This dashboard presents observed CSO data against CAP 2025 policy targets to show Ireland's progress across the three ASI pillars."))
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+# ============================================================================
+# SERVER LOGIC
+# ============================================================================
+
+server <- function(input, output, session) {
+  
+  # Load actual CSO data
+  data <- get_actual_cso_data()
+  
+  # ========================================================================
+  # SETTING THE SCENE TAB OUTPUTS
+  # ========================================================================
+  
+  output$scene_energy_trend <- renderPlotly({
+    sector_cols <- c(
+      "Sum of all transport", "Residential", "Sum of all industry sub-sectors",
+      "Commercial services", "Public services", "Agricultural", "Fisheries"
+    )
+    
+    # Pull 2024 row and compute % of national total
+    row_2024 <- data$energy_by_sector %>% filter(Year == 2024)
+    total_2024 <- row_2024$Total
+    
+    chart_data <- data.frame(
+      Sector = sector_cols,
+      ktoe   = as.numeric(row_2024[, sector_cols])
+    ) %>%
+      mutate(
+        Pct    = round(100 * ktoe / total_2024, 1),
+        Colour = ifelse(Sector == "Sum of all transport", "#d32f2f", "#607D8B"),
+        Label  = paste0(Pct, "%")
+      ) %>%
+      arrange(desc(Pct))   # highest bar first
+    
+    plot_ly(chart_data,
+            x = ~Pct,
+            y = ~reorder(Sector, Pct),
+            type = 'bar',
+            orientation = 'h',
+            marker = list(color = ~Colour),
+            text = ~Label,
+            textposition = 'outside',
+            hovertemplate = '<b>%{y}</b><br>%{x:.1f}% of national total<extra></extra>') %>%
+      layout(
+        xaxis = list(title = "% of national final energy consumption",
+                     range = list(0, 50),
+                     gridcolor = "#e8ecf4", gridwidth = 1, showline = FALSE, zeroline = FALSE),
+        yaxis = list(title = "", showgrid = FALSE, showline = FALSE),
+        showlegend = FALSE,
+        margin = list(l = 220, r = 60)
+      )
+  })
+  
+  output$scene_energy_treemap <- renderPlotly({
+    sector_cols <- c(
+      "Sum of all transport", "Residential", "Sum of all industry sub-sectors",
+      "Commercial services", "Public services", "Agricultural", "Fisheries"
+    )
+    
+    row_2024   <- data$energy_by_sector %>% filter(Year == 2024)
+    total_2024 <- row_2024$Total
+    
+    chart_data <- data.frame(
+      Sector = sector_cols,
+      ktoe   = as.numeric(row_2024[, sector_cols])
+    ) %>%
+      mutate(
+        Pct    = round(100 * ktoe / total_2024, 1),
+        Colour = ifelse(Sector == "Sum of all transport", "#d32f2f", "#607D8B")
+      )
+    
+    plot_ly(
+      type    = "treemap",
+      labels  = chart_data$Sector,
+      values  = chart_data$ktoe,
+      parents = rep("Ireland", nrow(chart_data)),
+      marker  = list(colors = chart_data$Colour),
+      texttemplate = "<b>%{label}</b><br>%{percentRoot:.1%}",
+      hovertemplate = "<b>%{label}</b><br>%{value:,.0f} ktoe<br>%{percentRoot:.1%} of national total<extra></extra>"
+    ) %>%
+      layout(margin = list(t = 10, b = 10))
+  })
+  
+  output$scene_transport_grouped <- renderPlotly({
+    row_2024      <- data$transport_subsectors %>% filter(Year == 2024)
+    transport_tot <- row_2024$Transport_Total
+    national_tot  <- data$energy_by_sector %>% filter(Year == 2024) %>% pull(Total)
+    
+    subsectors <- c("Road Private Car", "Road Freight", "International Aviation")
+    ktoe_vals  <- c(row_2024$Road_Private_Car, row_2024$Road_Freight, row_2024$International_Aviation)
+    
+    chart_data <- data.frame(
+      Subsector        = subsectors,
+      Pct_Transport    = round(100 * ktoe_vals / transport_tot, 1),
+      Pct_National     = round(100 * ktoe_vals / national_tot,  1)
+    )
+    
+    plot_ly(chart_data, x = ~Subsector) %>%
+      add_trace(
+        y = ~Pct_Transport,
+        name = "% of Transport Energy",
+        type = 'bar',
+        marker = list(color = '#d32f2f'),
+        text = ~paste0(Pct_Transport, "%"),
+        textposition = 'outside',
+        hovertemplate = '<b>%{x}</b><br>%{y:.1f}% of transport energy<extra></extra>'
+      ) %>%
+      add_trace(
+        y = ~Pct_National,
+        name = "% of National Energy",
+        type = 'bar',
+        marker = list(color = '#607D8B'),
+        text = ~paste0(Pct_National, "%"),
+        textposition = 'outside',
+        hovertemplate = '<b>%{x}</b><br>%{y:.1f}% of national energy<extra></extra>'
+      ) %>%
+      layout(
+        barmode = 'group',
+        xaxis = list(title = "", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "% share", range = list(0, 50),
+                     gridcolor = "#e8ecf4", gridwidth = 1, showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.15)
+      )
+  })
+  
+  output$scene_ghg_sectors <- renderPlotly({
+    # Wilke: perceptually distinct palette — no two similar greys
+    sector_colours <- c(
+      "Agriculture"         = "#4dac26",   # green
+      "Transport"           = "#d32f2f",   # red   (consistent across dashboard)
+      "Energy"              = "#f1a340",   # amber
+      "Industry"            = "#998ec3",   # purple
+      "Residential"         = "#2196F3",   # blue
+      "Commercial Services" = "#74add1",   # light blue  (distinct from Residential)
+      "Public Services"     = "#a6611a",   # brown
+      "Waste"               = "#80cdc1"    # teal
+    )
+    
+    plot_ly(data$national_ghg_pct,
+            x = ~Year, y = ~Pct, color = ~Sector,
+            type = 'bar', colors = sector_colours,
+            hovertemplate = '<b>%{fullData.name}</b>: %{y:.1f}%<extra></extra>') %>%
+      layout(
+        barmode   = 'stack',
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "% of National GHG Emissions", range = list(0, 101),
+                         gridcolor = "#e8ecf4", gridwidth = 1, showline = FALSE, zeroline = FALSE),
+        hovermode = 'x unified',
+        legend    = list(x = 1.01, y = 0.99)
+      )
+  })
+  
+  output$scene_commuting <- renderPlotly({
+    # Wilke: colour should encode meaning, not just distinguish categories already
+    # labelled on the axis. Use semantic groupings:
+    #   car modes -> red  |  public transport -> blue  |  active travel -> green
+    #   home/remote -> amber  |  other/not stated -> grey
+    mode_colours <- c(
+      "Car Driver"                  = "#c0392b",  # car — red
+      "Car passenger"               = "#e57373",  # car (lighter)
+      "Van"                         = "#a93226",  # car-adjacent — dark red
+      "Motorcycle or scooter"       = "#e8a090",  # car-adjacent — pale red
+      "Bus, minibus or coach"       = "#2196F3",  # public transport — blue
+      "Train, DART or LUAS"         = "#1565C0",  # public transport — dark blue
+      "On Foot"                     = "#388e3c",  # active — green
+      "Bicycle"                     = "#4CAF50",  # active — lighter green
+      "Work mainly at or from home" = "#f1a340",  # remote — amber
+      "Other (incl. lorry)"         = "#9E9E9E",  # other — grey
+      "Not stated"                  = "#BDBDBD"   # unknown — light grey
+    )
+    
+    chart <- data$commuting_mode %>%
+      mutate(
+        Colour = mode_colours[as.character(Mode)],
+        Label  = paste0(Pct, "%")
+      )
+    
+    plot_ly(chart,
+            x = ~Pct,
+            y = ~reorder(Mode, Pct),
+            type = 'bar',
+            orientation = 'h',
+            marker = list(color = ~Colour),
+            text = ~Label,
+            textposition = 'outside',
+            hovertemplate = '<b>%{y}</b>: %{x:.1f}% of workers<extra></extra>') %>%
+      layout(
+        xaxis = list(title = "% of Workers", range = list(0, 65),
+                     showgrid = FALSE, showline = FALSE, zeroline = FALSE),
+        yaxis = list(title = "", showgrid = FALSE, showline = FALSE),
+        showlegend = FALSE,
+        margin = list(l = 220, r = 60)
+      )
+  })
+  
+  
+  
+  
+  # ========================================================================
+  # AVOID TAB OUTPUTS
+  # ========================================================================
+  
+  output$avoid_vkt_total_plot <- renderPlotly({
+    # CAP 2025 Target: 20% reduction in VKT by 2030 relative to the 2018 baseline
+    # 2018 baseline (actual): 35.959 billion km
+    # 2030 target:            80% of 2018 baseline = 28.77 billion km
+    baseline_2018 <- 35.959
+    target_2030   <- baseline_2018 * 0.80
+    
+    # Linear trajectory: 2018 baseline → 2030 target
+    trajectory_years <- 2018:2030
+    trajectory_vals  <- baseline_2018 + (target_2030 - baseline_2018) *
+      (trajectory_years - 2018) / (2030 - 2018)
+    
+    plot_ly() %>%
+      # CAP25 target trajectory (drawn first so actuals sit on top)
+      add_trace(
+        x = trajectory_years, y = trajectory_vals,
+        type = 'scatter', mode = 'lines',
+        name = 'CAP 2025 target pathway',
+        line = list(color = '#00959f', dash = 'dash', width = 2),
+        hovertemplate = '<b>%{x}</b> target: %{y:.2f} billion km<extra></extra>'
+      ) %>%
+      # 2018 baseline reference
+      add_trace(
+        x = c(2018, 2030), y = c(baseline_2018, baseline_2018),
+        type = 'scatter', mode = 'lines',
+        name = '2018 baseline',
+        line = list(color = '#888', dash = 'dot', width = 1),
+        hoverinfo = 'skip'
+      ) %>%
+      # Actual VKT (solid red line, primary series)
+      add_trace(
+        data = data$private_car_vkt,
+        x = ~Year, y = ~Total_Billion_Km,
+        type = 'scatter', mode = 'lines+markers',
+        name = 'Actual VKT',
+        line   = list(color = '#c0392b', width = 3),
+        marker = list(size = 8, color = '#c0392b'),
+        hovertemplate = '<b>%{x}</b> actual: %{y:.2f} billion km<extra></extra>'
+      ) %>%
+      # 2030 endpoint marker
+      add_trace(
+        x = 2030, y = target_2030,
+        type = 'scatter', mode = 'markers+text',
+        name = '2030 target',
+        marker = list(size = 12, color = '#00959f', symbol = 'diamond'),
+        text = paste0("2030 target\n", round(target_2030, 1), " Bn km"),
+        textposition = 'middle right',
+        textfont = list(color = '#00959f', size = 11),
+        hovertemplate = '<b>2030 target</b>: %{y:.2f} billion km<extra></extra>',
+        showlegend = FALSE
+      ) %>%
+      layout(
+        xaxis = list(title = "Year", range = c(2017.5, 2031.5),
+                     showgrid = FALSE, showline = FALSE, ticks = "outside", dtick = 2),
+        yaxis = list(title = "Billion km",
+                     range = c(20, 40),
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        hovermode = 'x unified',
+        legend    = list(orientation = "h", x = 0, y = -0.22),
+        annotations = list(
+          list(
+            x = 2018, y = baseline_2018,
+            text = "2018 baseline<br>35.96 Bn km",
+            showarrow = TRUE, arrowhead = 2, arrowsize = 0.8,
+            ax = -30, ay = -30,
+            font = list(size = 10, color = '#555'),
+            bgcolor = 'rgba(255,255,255,0.85)', borderpad = 3
+          )
+        )
+      )
+  })
+  
+  output$avoid_vkt_average_plot <- renderPlotly({
+    # Wilke: area fill to zero is misleading when zero is not a meaningful baseline
+    # (a car travelling 0 km is not a relevant reference point). Use a plain line.
+    baseline_avg <- 16352
+    yr <- range(data$private_car_vkt$Year)
+    
+    plot_ly() %>%
+      add_trace(
+        data = data$private_car_vkt,
+        x = ~Year, y = ~Average_Km,
+        type = 'scatter', mode = 'lines+markers',
+        name = 'Average km per car',
+        line   = list(color = '#e6861a', width = 2.5),
+        marker = list(size = 7, color = '#e6861a'),
+        hovertemplate = '<b>%{x}</b>: %{y:,.0f} km<extra></extra>'
+      ) %>%
+      add_trace(
+        x = c(yr[1], yr[2]),
+        y = c(baseline_avg, baseline_avg),
+        type = 'scatter', mode = 'lines',
+        name = '2019 pre-pandemic level',
+        line = list(color = '#888', dash = 'dot', width = 1.5),
+        hoverinfo = 'skip'
+      ) %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "km per car", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = 'x unified',
+        legend    = list(orientation = "h", x = 0, y = -0.2)
+      )
+  })
+  
+  output$avoid_vkt_change_plot <- renderPlotly({
+    plot_ly() %>%
+      add_trace(
+        data = data$private_car_vkt,
+        x = ~Year, y = ~Change_vs_2019_Pct,
+        type = 'bar',
+        marker = list(
+          color = ~ifelse(Change_vs_2019_Pct < 0, '#4CAF50', '#d32f2f')
+        ),
+        text = ~paste0(Change_vs_2019_Pct, "%"),
+        textposition = 'outside',
+        hovertemplate = '%{y:.1f}%<extra></extra>',
+        showlegend = FALSE
+      ) %>%
+      add_trace(
+        x = c(2015.5, 2023.5), 
+        y = c(0, 0),
+        type = 'scatter', mode = 'lines',
+        line = list(color = 'black', width = 1),
+        showlegend = FALSE,
+        hoverinfo = 'skip'
+      ) %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "% change from 2019",
+                         gridcolor = "#e8ecf4", gridwidth = 1, showline = FALSE, zeroline = TRUE,
+                         zerolinecolor = "#aaa", zerolinewidth = 1),
+        showlegend = FALSE
+      )
+  })
+  
+  output$avoid_remote_work_plot <- renderPlotly({
+    plot_ly(data$remote_work, x = ~Year, y = ~Remote_Work_Percent,
+            type = 'bar',
+            marker = list(color = '#405381'),
+            text = ~paste0(Remote_Work_Percent, "%"),
+            textposition = 'outside',
+            hovertemplate = '<b>%{x}</b>: %{y}% working remotely<extra></extra>') %>%
+      layout(
+        xaxis = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "% of workforce", gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE)
+      )
+  })
+  
+  output$avoid_freight_plot <- renderPlotly({
+    plot_ly() %>%
+      add_trace(
+        data = data$road_freight,
+        x = ~Year,
+        y = ~Tonne_Km_Million,
+        type = 'scatter', mode = 'lines+markers',
+        name = "Tonne-Kilometres",
+        line   = list(color = '#405381', width = 2.5),
+        marker = list(size = 7, color = '#405381'),
+        hovertemplate = '<b>%{x}</b>: %{y:,.0f} million tonne-km<extra></extra>'
+      ) %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = 'x unified'
+      )
+  })
+  
+  output$avoid_freight_km_bar <- renderPlotly({
+    plot_ly(
+      data$freight_vehicle_indicators,
+      x = ~Year, y = ~KM_Travelled_M,
+      type = "bar",
+      marker = list(color = "#405381"),
+      hovertemplate = "<b>%{x}</b>: %{y:,.0f} million km<extra></extra>"
+    ) %>%
+      layout(
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Million km", gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        showlegend = FALSE
+      )
+  })
+  
+  output$avoid_freight_tonne_km_bar <- renderPlotly({
+    plot_ly(
+      data$road_freight,
+      x = ~Year, y = ~Tonne_Km_Million,
+      type = "bar",
+      marker = list(color = "#00959f"),
+      hovertemplate = "<b>%{x}</b>: %{y:,.0f} million tonne-km<extra></extra>"
+    ) %>%
+      layout(
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        showlegend = FALSE
+      )
+  })
+  
+  output$avoid_freight_nst_line <- renderPlotly({
+    # Wilke: use a qualitative palette with good perceptual separation for 4 categories
+    colours <- c(
+      "Products of agriculture, forestry and fishing" = "#4dac26",   # green
+      "Quarry products, metal ores and peat"          = "#a6611a",   # brown
+      "Foodstuffs"                                    = "#d32f2f",   # red
+      "Other non-metallic mineral products"           = "#405381"    # navy
+    )
+    
+    nst <- data$freight_nst
+    
+    plot_ly() %>%
+      add_trace(
+        data = nst %>% filter(NST_Group == "Products of agriculture, forestry and fishing"),
+        x = ~Year, y = ~Tonne_Km_Million, type = "scatter", mode = "lines+markers",
+        name = "Agriculture, Forestry & Fishing",
+        line   = list(color = colours["Products of agriculture, forestry and fishing"], width = 3),
+        marker = list(size = 8),
+        hovertemplate = "<b>Agriculture, Forestry & Fishing</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>"
+      ) %>%
+      add_trace(
+        data = nst %>% filter(NST_Group == "Quarry products, metal ores and peat"),
+        x = ~Year, y = ~Tonne_Km_Million, type = "scatter", mode = "lines+markers",
+        name = "Quarry Products, Metal Ores & Peat",
+        line   = list(color = colours["Quarry products, metal ores and peat"], width = 3),
+        marker = list(size = 8),
+        hovertemplate = "<b>Quarry Products, Metal Ores & Peat</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>"
+      ) %>%
+      add_trace(
+        data = nst %>% filter(NST_Group == "Foodstuffs"),
+        x = ~Year, y = ~Tonne_Km_Million, type = "scatter", mode = "lines+markers",
+        name = "Foodstuffs",
+        line   = list(color = colours["Foodstuffs"], width = 3),
+        marker = list(size = 8),
+        hovertemplate = "<b>Foodstuffs</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>"
+      ) %>%
+      add_trace(
+        data = nst %>% filter(NST_Group == "Other non-metallic mineral products"),
+        x = ~Year, y = ~Tonne_Km_Million, type = "scatter", mode = "lines+markers",
+        name = "Other Non-Metallic Minerals",
+        line   = list(color = colours["Other non-metallic mineral products"], width = 3),
+        marker = list(size = 8),
+        hovertemplate = "<b>Other Non-Metallic Minerals</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>"
+      ) %>%
+      layout(
+        xaxis     = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        legend    = list(orientation = "h", x = 0, y = -0.25),
+        hovermode = "x unified"
+      )
+  })
+  
+  output$avoid_freight_main_use_line <- renderPlotly({
+    # Wilke: for 10 categories, use a palette with strong perceptual separation.
+    # Group by semantic type: commercial (blues), delivery (oranges/reds), agricultural (greens)
+    colours <- c(
+      "Import/Export work"                                 = "#405381",  # navy
+      "Other work"                                         = "#8693b3",  # light navy
+      "Delivery of goods to retail outlets"                = "#e6861a",  # amber
+      "Delivery of goods to wholesalers"                   = "#f1a340",  # light amber
+      "Delivery of goods to households"                    = "#fdd49e",  # pale amber
+      "Delivery of materials and fuels to factories"       = "#c0392b",  # red
+      "Delivery of goods to road works or building sites"  = "#e57373",  # light red
+      "Carriage of livestock"                              = "#4dac26",  # green
+      "Carriage of other farm produce from farms"          = "#7fbc41",  # light green
+      "Carriage of fertilisers, feeding stuffs etc. to farms" = "#b8e186" # pale green
+    )
+    
+    mu <- data$freight_main_use
+    
+    p <- plot_ly()
+    for (grp in names(colours)) {
+      grp_data <- mu %>% filter(Main_Use == grp)
+      if (nrow(grp_data) == 0) next
+      p <- p %>% add_trace(
+        data = grp_data,
+        x = ~Year, y = ~Tonne_Km_Million,
+        type = "scatter", mode = "lines+markers",
+        name = grp,
+        line   = list(color = colours[[grp]], width = 2),
+        marker = list(size = 6, color = colours[[grp]]),
+        hovertemplate = paste0("<b>", grp, "</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>")
+      )
+    }
+    
+    p %>%
+      layout(
+        xaxis     = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        legend    = list(orientation = "h", x = 0, y = -0.4, font = list(size = 11)),
+        hovermode = "x unified",
+        margin    = list(b = 160)
+      )
+  })
+  
+  output$avoid_freight_main_use_stack <- renderPlotly({
+    colours <- c(
+      "Import/Export work"                                 = "#405381",
+      "Other work"                                         = "#8693b3",
+      "Delivery of goods to retail outlets"                = "#e6861a",
+      "Delivery of goods to wholesalers"                   = "#f1a340",
+      "Delivery of goods to households"                    = "#fdd49e",
+      "Delivery of materials and fuels to factories"       = "#c0392b",
+      "Delivery of goods to road works or building sites"  = "#e57373",
+      "Carriage of livestock"                              = "#4dac26",
+      "Carriage of other farm produce from farms"          = "#7fbc41",
+      "Carriage of fertilisers, feeding stuffs etc. to farms" = "#b8e186"
+    )
+    
+    mu <- data$freight_main_use
+    
+    p <- plot_ly()
+    for (grp in names(colours)) {
+      grp_data <- mu %>% filter(Main_Use == grp)
+      if (nrow(grp_data) == 0) next
+      p <- p %>% add_trace(
+        data = grp_data,
+        x = ~Year, y = ~Tonne_Km_Million,
+        type = "bar",
+        name = grp,
+        marker = list(color = colours[[grp]]),
+        hovertemplate = paste0("<b>", grp, "</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>")
+      )
+    }
+    
+    p %>%
+      layout(
+        barmode   = "stack",
+        xaxis     = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        legend    = list(orientation = "h", x = 0, y = -0.4, font = list(size = 11)),
+        hovermode = "x unified",
+        margin    = list(b = 160)
+      )
+  })
+  
+  output$avoid_freight_vehicle_index <- renderPlotly({
+    fv <- data$freight_vehicle_indicators %>%
+      select(Year, Idx_Vehicle_Pop, Idx_KM_Travelled, Idx_Average_KM) %>%
+      pivot_longer(-Year, names_to = "Indicator", values_to = "Index") %>%
+      mutate(Indicator = recode(Indicator,
+                                "Idx_Vehicle_Pop"  = "Vehicle Population",
+                                "Idx_KM_Travelled" = "KM Travelled",
+                                "Idx_Average_KM"   = "Average KM"
+      ))
+    
+    colours <- c(
+      "Vehicle Population" = "#FF9800",
+      "KM Travelled"       = "#795548",
+      "Average KM"         = "#607D8B"
+    )
+    
+    yr_range <- range(fv$Year)
+    
+    plot_ly() %>%
+      add_trace(
+        data = fv %>% filter(Indicator == "Vehicle Population"),
+        x = ~Year, y = ~Index, type = "scatter", mode = "lines+markers",
+        name = "Vehicle Population",
+        line   = list(color = colours["Vehicle Population"], width = 3),
+        marker = list(size = 8, color = colours["Vehicle Population"]),
+        hovertemplate = "<b>Vehicle Population</b>: %{y:.3f}<extra></extra>"
+      ) %>%
+      add_trace(
+        data = fv %>% filter(Indicator == "KM Travelled"),
+        x = ~Year, y = ~Index, type = "scatter", mode = "lines+markers",
+        name = "KM Travelled",
+        line   = list(color = colours["KM Travelled"], width = 3),
+        marker = list(size = 8, color = colours["KM Travelled"]),
+        hovertemplate = "<b>KM Travelled</b>: %{y:.3f}<extra></extra>"
+      ) %>%
+      add_trace(
+        data = fv %>% filter(Indicator == "Average KM"),
+        x = ~Year, y = ~Index, type = "scatter", mode = "lines+markers",
+        name = "Average KM",
+        line   = list(color = colours["Average KM"], width = 3),
+        marker = list(size = 8, color = colours["Average KM"]),
+        hovertemplate = "<b>Average KM</b>: %{y:.3f}<extra></extra>"
+      ) %>%
+      add_trace(
+        x = yr_range, y = c(1, 1),
+        type = "scatter", mode = "lines",
+        line = list(color = "black", dash = "dash", width = 1),
+        name = "2015 Baseline",
+        hoverinfo = "none",
+        showlegend = TRUE
+      ) %>%
+      layout(
+        xaxis     = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Index (2015 = 1)", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        legend    = list(orientation = "h", x = 0, y = -0.2),
+        hovermode = "x unified"
+      )
+  })
+  
+  output$avoid_aviation_index <- renderPlotly({
+    colours <- c("Passengers"         = "#2196F3",
+                 "Freight"            = "#FF9800",
+                 "Commercial Flights" = "#4CAF50")
+    
+    av_2020 <- data$aviation_activity %>% filter(Year >= 2020)
+    yr_range <- range(av_2020$Year)
+    
+    plot_ly(av_2020,
+            x = ~Year, y = ~Index, color = ~Statistic,
+            type = "scatter", mode = "lines+markers",
+            colors = colours,
+            line   = list(width = 3), marker = list(size = 8),
+            hovertemplate = "<b>%{fullData.name}</b>: %{y:.1f}<extra></extra>") %>%
+      add_trace(
+        x = yr_range, y = c(100, 100),
+        type = "scatter", mode = "lines",
+        line = list(color = "gray", dash = "dash", width = 1),
+        showlegend = FALSE, hoverinfo = "skip",
+        inherit = FALSE
+      ) %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Index (2020 = 100)", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = "x unified",
+        legend    = list(orientation = "h", x = 0, y = -0.2)
+      )
+  })
+  
+  output$avoid_aviation_freight <- renderPlotly({
+    freight <- data$aviation_activity %>%
+      filter(Statistic == "Freight") %>%
+      arrange(Year)
+    
+    plot_ly(freight,
+            x = ~Year, y = ~Value,
+            type = "scatter", mode = "lines+markers",
+            line   = list(color = "#e6861a", width = 2.5),
+            marker = list(size = 7, color = "#e6861a"),
+            hovertemplate = "<b>%{x}</b>: %{y:,.0f} thousand tonnes<extra></extra>") %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Thousand tonnes", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = "x unified"
+      )
+  })
+  
+  output$scene_aviation_line <- renderPlotly({
+    # Add Total as sum of all three groups per year
+    totals <- data$aviation_passengers %>%
+      group_by(Year) %>%
+      summarise(Group = "Total", Passengers = sum(Passengers), .groups = "drop")
+    
+    av <- bind_rows(data$aviation_passengers, totals)
+    
+    colours <- c("Dublin" = "#2196F3", "Cork" = "#d32f2f",
+                 "Other"  = "#FF9800", "Total" = "#4CAF50")
+    
+    plot_ly(av, x = ~Year, y = ~Passengers, color = ~Group,
+            type = "scatter", mode = "lines+markers",
+            colors = colours,
+            line   = list(width = 2.5), marker = list(size = 6),
+            hovertemplate = "<b>%{fullData.name}</b>: %{y:,.0f}<extra></extra>") %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Passengers", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = "x unified",
+        legend    = list(x = 0.02, y = 0.98)
+      )
+  })
+  
+  output$scene_aviation_bar <- renderPlotly({
+    colours <- c("Dublin" = "#405381", "Cork" = "#00959f", "Other" = "#f1a340")
+    
+    plot_ly(data$aviation_passengers,
+            x = ~Year, y = ~Passengers, color = ~Group,
+            type = "bar", colors = colours,
+            hovertemplate = "<b>%{fullData.name}</b>: %{y:,.0f}<extra></extra>") %>%
+      layout(
+        barmode   = "stack",
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Passengers", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = "x unified",
+        legend    = list(x = 0.02, y = 0.98)
+      )
+  })
+  
+  output$avoid_car_index_plot <- renderPlotly({
+    d <- data$car_indicators
+    
+    plot_ly(d) %>%
+      add_trace(x = ~Year, y = ~Idx_Population,   name = "Population",
+                type = 'scatter', mode = 'lines+markers',
+                line = list(color = '#2196F3', width = 3), marker = list(size = 8)) %>%
+      add_trace(x = ~Year, y = ~Idx_Vehicle_Pop,  name = "Vehicle Population",
+                type = 'scatter', mode = 'lines+markers',
+                line = list(color = '#FF9800', width = 3), marker = list(size = 8)) %>%
+      add_trace(x = ~Year, y = ~Idx_KM_Travelled, name = "KM Travelled",
+                type = 'scatter', mode = 'lines+markers',
+                line = list(color = '#d32f2f', width = 3), marker = list(size = 8)) %>%
+      add_trace(x = ~Year, y = ~Idx_Average_KM,   name = "Average KM per Car",
+                type = 'scatter', mode = 'lines+markers',
+                line = list(color = '#9C27B0', width = 3), marker = list(size = 8)) %>%
+      add_trace(x = range(d$Year), y = c(1, 1),
+                type = 'scatter', mode = 'lines', name = "2019 Baseline",
+                line = list(color = 'gray', dash = 'dash', width = 1),
+                hoverinfo = 'skip', showlegend = FALSE) %>%
+      layout(
+        xaxis     = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis     = list(title = "Index (2015 = 1)", gridcolor = "#e8ecf4", gridwidth = 1,
+                         showline = FALSE, zeroline = FALSE),
+        hovermode = 'x unified',
+        legend    = list(orientation = "h", x = 0, y = -0.2)
+      )
+  })
+  
+  output$avoid_car_kpi_table <- renderTable({
+    d <- data$car_indicators %>% select(Year, Cars_per_1000)
+    names(d) <- c("Year", "Cars per 1,000")
+    d
+  }, digits = 1, striped = TRUE, hover = TRUE)
+  
+  output$avoid_km_kpi_table <- renderTable({
+    d <- data$car_indicators %>% select(Year, KM_per_capita)
+    names(d) <- c("Year", "KM per Capita")
+    d
+  }, digits = 0, striped = TRUE, hover = TRUE)
+  
+  # ========================================================================
+  # SHIFT TAB OUTPUTS (6 metrics, all live CSO data)
+  # ========================================================================
+  
+  # 1. Bus passenger services by type (TOA16) — 2011-2024 stacked bar
+  output$shift_bus_services_plot <- renderPlotly({
+    bus_colours <- c(
+      "Dublin city services"              = "#405381",
+      "Provincial city and town services" = "#00959f",
+      "Other scheduled services"          = "#5BC1A5",
+      "School transport scheme"           = "#FCBE72"
+    )
+    plot_ly(data$pt_bus_services,
+            x = ~Year, y = ~Passengers_Millions,
+            color = ~Service_Type, colors = bus_colours,
+            type = "bar",
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:.1f}m journeys<extra></extra>") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Million passenger journeys",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.22),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 2. Rail passenger journeys (THA24) — annual bar
+  output$shift_rail_plot <- renderPlotly({
+    rail <- data$pt_rail_annual %>% filter(Mode == "Rail")
+    plot_ly(rail,
+            x = ~Year, y = ~Journeys_Millions,
+            type = "bar",
+            marker = list(color = "#405381"),
+            text = ~paste0(Journeys_Millions, "m"),
+            textposition = "outside",
+            hovertemplate = "<b>%{x}</b>: %{y:.1f} million rail journeys<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Million passenger journeys",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        showlegend = FALSE
+      )
+  })
+  
+  # 3. Luas passenger numbers (TOA11) — Red & Green line
+  output$shift_luas_plot <- renderPlotly({
+    luas <- data$pt_luas_annual %>% filter(Line %in% c("Red line", "Green line"))
+    colours <- c("Red line" = "#c0392b", "Green line" = "#00959f")
+    plot_ly(luas,
+            x = ~Year, y = ~Journeys_Millions,
+            color = ~Line, colors = colours,
+            type = "scatter", mode = "lines+markers",
+            line = list(width = 2.5), marker = list(size = 7),
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:.1f}m journeys<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Million passenger journeys",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.2),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 4. PT journeys indexed to 2019 = 100 (derived)
+  # Only Bus and Luas have pre-2019 data in the new CSO tables; Rail in THA24
+  # only starts from 2020, so it is excluded from this chart to preserve the
+  # 2019 = 100 baseline comparison.
+  output$shift_pt_indexed_plot <- renderPlotly({
+    bus_annual <- data$pt_bus_services %>%
+      group_by(Year) %>%
+      summarise(Journeys = sum(Passengers_Millions, na.rm = TRUE), .groups = "drop") %>%
+      mutate(Mode = "Bus")
+    
+    luas_annual <- data$pt_luas_annual %>%
+      filter(Line == "All Luas lines") %>%
+      select(Year, Journeys = Journeys_Millions) %>%
+      mutate(Mode = "Luas")
+    
+    all_modes <- bind_rows(bus_annual, luas_annual) %>%
+      filter(!is.na(Journeys), Journeys > 0)
+    
+    # Index each mode to its own 2019 value
+    base_2019 <- all_modes %>%
+      filter(Year == 2019) %>%
+      select(Mode, Base = Journeys)
+    
+    indexed <- all_modes %>%
+      left_join(base_2019, by = "Mode") %>%
+      mutate(Index = round(Journeys / Base * 100, 1)) %>%
+      filter(Year >= 2015, is.finite(Index))
+    
+    colours <- c("Bus" = "#405381", "Luas" = "#00959f")
+    
+    yr_range <- range(indexed$Year)
+    
+    plot_ly(indexed,
+            x = ~Year, y = ~Index,
+            color = ~Mode, colors = colours,
+            type = "scatter", mode = "lines+markers",
+            line = list(width = 2.5), marker = list(size = 7),
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:.0f}<extra></extra>") %>%
+      add_trace(
+        x = yr_range, y = c(100, 100),
+        type = "scatter", mode = "lines",
+        line = list(color = "#888", dash = "dot", width = 1),
+        name = "2019 baseline",
+        hoverinfo = "skip",
+        inherit = FALSE
+      ) %>%
+      layout(
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Index (2019 = 100)",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.22),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 5. Bike share journeys (Dublin + regional cities) — stacked bar
+  output$shift_bike_share_plot <- renderPlotly({
+    colours <- c(
+      "Dublin"    = "#405381",
+      "Cork"      = "#00959f",
+      "Galway"    = "#5BC1A5",
+      "Limerick"  = "#FCBE72",
+      "Waterford" = "#c0392b"
+    )
+    plot_ly(data$bike_share,
+            x = ~Year, y = ~Journeys_Thousands,
+            color = ~City, colors = colours,
+            type = "bar",
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:,.0f}k journeys<extra></extra>") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Thousand journeys",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.22),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 6a. Census 2022 commute mode share — horizontal bar
+  output$shift_commute_mode_plot <- renderPlotly({
+    # Re-use commuting_mode dataset (already fetched for Scene tab)
+    mode_colours <- c(
+      "Car Driver"                  = "#c0392b",
+      "Car passenger"               = "#e57373",
+      "Van"                         = "#a93226",
+      "Motorcycle or scooter"       = "#e8a090",
+      "Bus, minibus or coach"       = "#2196F3",
+      "Train, DART or LUAS"         = "#1565C0",
+      "On Foot"                     = "#388e3c",
+      "Bicycle"                     = "#4CAF50",
+      "Work mainly at or from home" = "#f1a340",
+      "Other (incl. lorry)"         = "#9E9E9E",
+      "Not stated"                  = "#BDBDBD"
+    )
+    
+    chart <- data$commuting_mode %>%
+      mutate(
+        Colour = mode_colours[as.character(Mode)],
+        Label  = paste0(Pct, "%")
+      )
+    
+    plot_ly(chart,
+            x = ~Pct, y = ~reorder(Mode, Pct),
+            type = "bar", orientation = "h",
+            marker = list(color = ~Colour),
+            text = ~Label, textposition = "outside",
+            hovertemplate = "<b>%{y}</b>: %{x:.1f}%<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "% of workers", range = c(0, 65),
+                     showgrid = FALSE, showline = FALSE, zeroline = FALSE),
+        yaxis = list(title = "", showgrid = FALSE, showline = FALSE),
+        showlegend = FALSE,
+        margin = list(l = 180, r = 60)
+      )
+  })
+  
+  # 6b. Census 2022 commute journey time distribution — horizontal bar
+  output$shift_commute_time_plot <- renderPlotly({
+    # Order journey time categories sensibly
+    time_order <- c(
+      "Under 15 mins",
+      "1/4 hour - under 1/2 hour",
+      "1/2 hour - under 3/4 hour",
+      "3/4 hour - under 1 hour",
+      "1 hour - under 1 1/2 hours",
+      "1 1/2 hours and over"
+    )
+    
+    chart <- data$commute_journey_time %>%
+      filter(Journey_Time %in% time_order) %>%
+      mutate(
+        Journey_Time = factor(Journey_Time, levels = rev(time_order)),
+        Label = paste0(Pct, "%"),
+        # Colour short commutes green (active travel opportunity), long ones grey
+        Colour = case_when(
+          Journey_Time %in% c("Under 15 mins", "1/4 hour - under 1/2 hour") ~ "#4dac26",
+          Journey_Time == "1/2 hour - under 3/4 hour" ~ "#f1a340",
+          TRUE ~ "#8693b3"
+        )
+      )
+    
+    plot_ly(chart,
+            x = ~Pct, y = ~Journey_Time,
+            type = "bar", orientation = "h",
+            marker = list(color = ~Colour),
+            text = ~Label, textposition = "outside",
+            hovertemplate = "<b>%{y}</b>: %{x:.1f}%<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "% of commuters",
+                     showgrid = FALSE, showline = FALSE, zeroline = FALSE),
+        yaxis = list(title = "", showgrid = FALSE, showline = FALSE),
+        showlegend = FALSE,
+        margin = list(l = 180, r = 60)
+      )
+  })
+  
+  # ========================================================================
+  # IMPROVE TAB OUTPUTS (6 metrics)
+  # ========================================================================
+  
+  # Shared fuel-type colour palette so all IMPROVE charts stay consistent
+  fuel_colours <- c(
+    "Petrol"                                    = "#8693b3",
+    "Diesel"                                    = "#405381",
+    "Petrol and electric hybrid"                = "#f1a340",
+    "Diesel and electric hybrid"                = "#c0392b",
+    "Petrol or Diesel plug-in hybrid electric"  = "#00959f",
+    "Electric"                                  = "#4dac26",
+    "Other fuel types"                          = "#BDBDBD"
+  )
+  
+  # 1. New private cars by fuel type (TEM27) — stacked bar
+  # Exclude 2026 (partial year — TEM27 only covers Jan-Mar 2026 so the bar
+  # would be ~25% the height of full years and mislead the eye)
+  output$improve_new_cars_fuel_plot <- renderPlotly({
+    d <- data$new_cars_fuel %>%
+      filter(Category == "New Private Cars") %>%
+      filter(Fuel %in% names(fuel_colours)) %>%
+      filter(Year < 2026)
+    
+    plot_ly(d,
+            x = ~Year, y = ~Count,
+            color = ~Fuel, colors = fuel_colours,
+            type = "bar",
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:,.0f}<extra></extra>") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "New private cars licensed",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.22),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 2. EV share of new private car registrations (derived)
+  output$improve_ev_share_plot <- renderPlotly({
+    d <- data$new_cars_fuel %>%
+      filter(Category == "New Private Cars") %>%
+      group_by(Year) %>%
+      summarise(
+        Total = sum(Count, na.rm = TRUE),
+        Electric = sum(Count[Fuel == "Electric"], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(EV_Pct = round(100 * Electric / Total, 1))
+    
+    plot_ly(d,
+            x = ~Year, y = ~EV_Pct,
+            type = "bar",
+            marker = list(color = "#4dac26"),
+            text = ~paste0(EV_Pct, "%"),
+            textposition = "outside",
+            hovertemplate = "<b>%{x}</b>: %{y:.1f}% electric<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "% of new private cars (BEV)",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        showlegend = FALSE
+      )
+  })
+  
+  # 3. New vs secondhand private cars by fuel type — grouped stacked bars
+  output$improve_new_vs_secondhand_plot <- renderPlotly({
+    d <- data$new_cars_fuel %>%
+      filter(Fuel %in% names(fuel_colours)) %>%
+      # Pick the latest year available so comparison is clearest
+      filter(Year == max(Year))
+    
+    # Grouped horizontal stacked bar, two bars (New vs Secondhand)
+    plot_ly(d,
+            y = ~Category, x = ~Count,
+            color = ~Fuel, colors = fuel_colours,
+            type = "bar", orientation = "h",
+            hovertemplate = "<b>%{fullData.name}</b><br>%{y}: %{x:,.0f}<extra></extra>") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = paste0("Cars licensed (", max(d$Year), ")"),
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        yaxis = list(title = "", showgrid = FALSE, showline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.25),
+        margin = list(l = 150, r = 40)
+      )
+  })
+  
+  # 4. Vehicles licensed 1997-2024 long trend (TEA01)
+  output$improve_long_trend_plot <- renderPlotly({
+    d <- data$vehicles_licensed_long %>%
+      filter(Type %in% c("New Private Cars", "New Goods Vehicles",
+                         "Secondhand Private Cars", "New Motor Cycles"))
+    
+    colours <- c(
+      "New Private Cars"         = "#405381",
+      "Secondhand Private Cars"  = "#8693b3",
+      "New Goods Vehicles"       = "#c0392b",
+      "New Motor Cycles"         = "#00959f"
+    )
+    
+    plot_ly(d,
+            x = ~Year, y = ~Count,
+            color = ~Type, colors = colours,
+            type = "scatter", mode = "lines",
+            line = list(width = 2),
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:,.0f}<extra></extra>") %>%
+      layout(
+        xaxis = list(title = "Year", showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Vehicles licensed for first time",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.2),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 5. Private car fleet composition by fuel type (THA17)
+  output$improve_fleet_fuel_plot <- renderPlotly({
+    d <- data$car_fleet_fuel
+    
+    colours <- c(
+      "Petrol"           = "#8693b3",
+      "Diesel"           = "#405381",
+      "Other fuel types" = "#4dac26"
+    )
+    
+    plot_ly(d,
+            x = ~Year, y = ~Count,
+            color = ~Fuel, colors = colours,
+            type = "bar",
+            hovertemplate = "<b>%{fullData.name}</b><br>%{x}: %{y:,.0f} cars<extra></extra>") %>%
+      layout(
+        barmode = "stack",
+        xaxis = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
+        yaxis = list(title = "Private cars in stock",
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        legend = list(orientation = "h", x = 0, y = -0.22),
+        hovermode = "x unified"
+      )
+  })
+  
+  # 6. Biofuel blending rate vs CAP 2030 target pathway
+  output$improve_biofuel_plot <- renderPlotly({
+    # Target pathway: linear from 2024 (10%) to 2030 (14%)
+    target_years <- 2018:2030
+    rtfo_path <- c(6, 6, 7, 8, 9, 10, 10, 11, 12, 13, 13.5, 14, 14)  # approx pathway
+    
+    plot_ly() %>%
+      add_trace(
+        x = target_years, y = rtfo_path,
+        type = "scatter", mode = "lines",
+        name = "CAP 2030 target pathway",
+        line = list(color = "#00959f", dash = "dash", width = 2),
+        hovertemplate = "<b>%{x}</b> target: %{y:.1f}%<extra></extra>"
+      ) %>%
+      add_trace(
+        data = data$biofuel_blend,
+        x = ~Year, y = ~RTFO_Obligation_Pct,
+        type = "scatter", mode = "lines",
+        name = "RTFO obligation",
+        line = list(color = "#8693b3", dash = "dot", width = 1.5),
+        hoverinfo = "skip"
+      ) %>%
+      add_trace(
+        data = data$biofuel_blend,
+        x = ~Year, y = ~Biofuel_Blend_Pct,
+        type = "scatter", mode = "lines+markers",
+        name = "Actual blend rate",
+        line = list(color = "#4dac26", width = 3),
+        marker = list(size = 8, color = "#4dac26"),
+        hovertemplate = "<b>%{x}</b> actual: %{y:.1f}%<extra></extra>"
+      ) %>%
+      add_trace(
+        x = 2030, y = 14,
+        type = "scatter", mode = "markers+text",
+        name = "2030 target",
+        marker = list(size = 12, color = "#00959f", symbol = "diamond"),
+        text = "2030 target\n14%",
+        textposition = "middle right",
+        textfont = list(color = "#00959f", size = 11),
+        hovertemplate = "<b>2030 target</b>: 14%<extra></extra>",
+        showlegend = FALSE
+      ) %>%
+      layout(
+        xaxis = list(title = "Year", range = c(2017.5, 2031.5),
+                     showgrid = FALSE, showline = FALSE, ticks = "outside", dtick = 2),
+        yaxis = list(title = "Biofuel blend rate (%)", range = c(0, 18),
+                     gridcolor = "#e8ecf4", gridwidth = 1,
+                     showline = FALSE, zeroline = FALSE),
+        hovermode = "x unified",
+        legend = list(orientation = "h", x = 0, y = -0.2)
+      )
+  })
+  
+  # ========================================================================
+  # OVERVIEW TAB — KPI INFOBOXES
+  # ========================================================================
+  
+  # Headline 1: Transport emissions vs 2018 baseline (CAP 2025 headline metric)
+  output$kpi_emissions <- renderInfoBox({
+    latest_em <- data$emissions %>% filter(Year == max(Year))
+    base_em <- data$emissions %>% filter(Year == 2018) %>% pull(Transport_Emissions)
+    delta <- round((latest_em$Transport_Emissions - base_em) / base_em * 100, 1)
+    sign <- ifelse(delta >= 0, "+", "")
+    infoBox(
+      paste0("Emissions (", latest_em$Year, ")"),
+      paste0(latest_em$Transport_Emissions, " MtCO\u2082eq"),
+      paste0(sign, delta, "% vs 2018 baseline (CAP target: −50% by 2030)"),
+      icon  = icon("smog"),
+      color = "red"
+    )
+  })
+  
+  # Headline 2: Private Car VKT vs 2019 baseline (CAP 2025 Avoid flagship)
+  output$kpi_ev_share <- renderInfoBox({
+    latest_vkt <- data$private_car_vkt %>% filter(Year == max(Year))
+    base_vkt <- data$private_car_vkt %>% filter(Year == 2019) %>% pull(Total_Billion_Km)
+    delta <- round((latest_vkt$Total_Billion_Km - base_vkt) / base_vkt * 100, 1)
+    sign <- ifelse(delta >= 0, "+", "")
+    infoBox(
+      paste0("Private Car VKT (", latest_vkt$Year, ")"),
+      paste0(round(latest_vkt$Total_Billion_Km, 1), " Bn km"),
+      paste0(sign, delta, "% vs 2019 (CAP target: −20% by 2030)"),
+      icon  = icon("road"),
+      color = "orange"
+    )
+  })
+  
+  # Headline 3: EV share of new private cars (CAP 2025 Improve flagship)
+  output$kpi_pt_journeys <- renderInfoBox({
+    ev <- data$new_cars_fuel %>%
+      filter(Category == "New Private Cars") %>%
+      group_by(Year) %>%
+      summarise(
+        Total = sum(Count, na.rm = TRUE),
+        Electric = sum(Count[Fuel == "Electric"], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(EV_Pct = round(100 * Electric / Total, 1)) %>%
+      filter(Year == max(Year))
+    infoBox(
+      paste0("New EV Share (", ev$Year, ")"),
+      paste0(ev$EV_Pct, "%"),
+      "Pure electric share of new private cars licensed",
+      icon  = icon("bolt"),
+      color = "green"
+    )
+  })
+  
+  # Headline 4: Remote working (Avoid behavioural lever)
+  output$kpi_remote_work <- renderInfoBox({
+    latest_rw <- data$remote_work %>% filter(Year == max(Year))
+    infoBox(
+      paste0("Remote Working (", latest_rw$Year, ")"),
+      paste0(latest_rw$Remote_Work_Percent, "%"),
+      "Workforce working at or from home",
+      icon  = icon("house-laptop"),
+      color = "blue"
+    )
+  })
+  
+  # ========================================================================
+  # OVERVIEW TAB — EMISSIONS VS CAP 2030 TARGET PATHWAY
+  # ========================================================================
+  
+  output$overview_emissions_target_plot <- renderPlotly({
+    # Linear target pathway per CAP 2025 Chapter 14:
+    # 2018 baseline = 12.3 MtCO2eq, 2030 target = 6.1 MtCO2eq (50% reduction)
+    baseline_yr  <- 2018
+    baseline_mt  <- 12.3
+    target_yr    <- 2030
+    target_mt    <- 6.1
+    
+    target_pathway <- data.frame(
+      Year      = seq(baseline_yr, target_yr),
+      Target_Mt = seq(baseline_mt, target_mt, length.out = target_yr - baseline_yr + 1)
+    )
+    
+    plot_ly() %>%
+      add_trace(
+        data = data$emissions,
+        x = ~Year, y = ~Transport_Emissions,
+        type = 'scatter', mode = 'lines+markers',
+        name = 'Actual Emissions',
+        line   = list(color = '#d32f2f', width = 3),
+        marker = list(size = 10),
+        hovertemplate = '%{y:.1f} MtCO\u2082eq<extra></extra>'
+      ) %>%
+      add_trace(
+        data = target_pathway,
+        x = ~Year, y = ~Target_Mt,
+        type = 'scatter', mode = 'lines',
+        name = 'CAP 2030 Target Pathway',
+        line = list(color = 'gray', dash = 'dash', width = 2),
+        hovertemplate = '%{y:.1f} MtCO\u2082eq (target)<extra></extra>'
+      ) %>%
+      layout(
+        xaxis = list(title = "Year", range = list(2017, 2031)),
+        yaxis = list(title = "Transport Emissions (MtCO\u2082eq)", range = list(0, 14)),
+        hovermode = 'x unified',
+        legend = list(x = 0.55, y = 0.98)
+      )
+  })
+}
+
+# ============================================================================
+# RUN APPLICATION
+# ============================================================================
+
+shinyApp(ui = ui, server = server)
