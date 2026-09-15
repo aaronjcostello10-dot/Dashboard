@@ -113,9 +113,9 @@ get_actual_cso_data <- function() {
     select(Year, Statistic, VALUE) %>%
     pivot_wider(names_from = Statistic, values_from = VALUE) %>%
     rename(
-      Vehicle_Population = `Vehicle Population (Number)`,
-      Total_Million_Km = `Kilometres Travelled (Million)`,
-      Average_Km = `Average Kilometres Travelled (Kilometres)`
+      Vehicle_Population = `Vehicle Population`,
+      Total_Million_Km = `Kilometres Travelled`,
+      Average_Km = `Average Kilometres Travelled`
     ) %>%
     mutate(
       Total_Billion_Km = Total_Million_Km / 1000,
@@ -145,8 +145,8 @@ get_actual_cso_data <- function() {
       filter(Year >= 2016 & Year <= 2024)
   }
 
-  tonne_km <- annual_stat(tfq01_raw, "Tonne-Kilometre",    "Tonne_Km_Million")
-  km_trav  <- annual_stat(tfq01_raw, "Kilometres Travelled", "KM_Travelled_Million")
+  tonne_km <- annual_stat(tfq01_raw, "Tonne-Kilometre",        "Tonne_Km_Million")
+  km_trav  <- annual_stat(tfq01_raw, "All Vehicle Kilometres", "KM_Travelled_Million")
 
   road_freight <- full_join(tonne_km, km_trav, by = "Year") %>% arrange(Year)
 
@@ -160,15 +160,16 @@ get_actual_cso_data <- function() {
   
   tfa19_raw <- cso_get_data("TFA19")
 
-  # Identify the goods/NST dimension column (not Statistic — its name varies by release)
+  # Identify the goods/NST dimension column (not Statistic or Type.of.Journey — name varies by release)
   goods_col <- names(tfa19_raw)[grepl("Goods|NST|Commodity|Type", names(tfa19_raw), ignore.case = TRUE) &
-                                  names(tfa19_raw) != "Statistic"][1]
+                                  names(tfa19_raw) != "Statistic" & names(tfa19_raw) != "Type.of.Journey"][1]
 
   freight_nst <- tfa19_raw %>%
     filter(grepl("Tonne.Kilometre|Tonne-Kilometre", Statistic, ignore.case = TRUE)) %>%
+    filter(Type.of.Journey == "All National and International journeys") %>%
     filter(.data[[goods_col]] %in% nst_groups) %>%
     pivot_longer(
-      cols      = -c(Statistic, all_of(goods_col)),
+      cols      = matches("^[0-9]{4}$"),
       names_to  = "Year",
       values_to = "Tonne_Km_Million"
     ) %>%
@@ -179,42 +180,6 @@ get_actual_cso_data <- function() {
     filter(!is.na(Tonne_Km_Million), Year >= 2014) %>%
     select(Year, NST_Group, Tonne_Km_Million) %>%
     arrange(NST_Group, Year)
-
-  # Road Freight Tonne-Km by Main Use — Source: CSO Table TFA01
-  main_use_groups <- c(
-    "Other work",
-    "Import/Export work",
-    "Delivery of goods to retail outlets",
-    "Delivery of goods to households",
-    "Delivery of goods to wholesalers",
-    "Delivery of materials and fuels to factories",
-    "Delivery of goods to road works or building sites",
-    "Carriage of livestock",
-    "Carriage of other farm produce from farms",
-    "Carriage of fertilisers, feeding stuffs etc. to farms"
-  )
-  
-  tfa01_raw <- cso_get_data("TFA01")
-
-  # Identify the main use dimension column (its name varies by release)
-  use_col <- names(tfa01_raw)[grepl("Use|Type|Activity|Main", names(tfa01_raw), ignore.case = TRUE) &
-                                names(tfa01_raw) != "Statistic"][1]
-
-  freight_main_use <- tfa01_raw %>%
-    filter(grepl("Tonne.Kilometre|Tonne-Kilometre", Statistic, ignore.case = TRUE)) %>%
-    filter(.data[[use_col]] %in% main_use_groups) %>%
-    pivot_longer(
-      cols      = -c(Statistic, all_of(use_col)),
-      names_to  = "Year",
-      values_to = "Tonne_Km_Million"
-    ) %>%
-    mutate(
-      Year      = as.integer(Year),
-      Main_Use  = .data[[use_col]]
-    ) %>%
-    filter(!is.na(Tonne_Km_Million), Year >= 2014) %>%
-    select(Year, Main_Use, Tonne_Km_Million) %>%
-    arrange(Main_Use, Year)
 
   # ============================================================================
   # SHIFT TAB DATA FETCHES
@@ -575,7 +540,6 @@ get_actual_cso_data <- function() {
     energy_by_sector = energy_by_sector,
     road_freight = road_freight,
     freight_nst = freight_nst,
-    freight_main_use = freight_main_use,
     remote_work = remote_work,
     private_car_vkt = private_car_vkt,
     aviation_activity = aviation_activity,
@@ -1140,19 +1104,7 @@ ui <- dashboardPage(
                 "Source: CSO TFA19 — Road Freight by Type of Goods (NST 2007)"),
           )
         ),
-        
-        fluidRow(
-          box(
-            title = "Tonne-Kilometres by Main Use of Vehicle",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            plotlyOutput("avoid_freight_main_use_stack", height = 480),
-            div(style = "font-size: 10px; color: #8693b3; padding: 4px 2px 0; text-align: right;",
-                "Source: CSO TFA01 — Road Freight by Main Use of Vehicle"),
-          )
-        ),
-        
+
         # ─────────── 4. AVIATION ───────────
         h3("4. Aviation",
            style = "margin-top: 24px; padding-top: 10px; border-top: 2px solid #00959f;"),
@@ -1461,7 +1413,6 @@ ui <- dashboardPage(
                   tags$li(tags$code("QES20"), " — Labour Force Survey: persons in employment, extent working at home. Drives the remote working prevalence chart."),
                   tags$li(tags$code("TFQ01"), " — Road Freight Transport Activity: tonne-kilometres, all NST 2007 goods, all business activities."),
                   tags$li(tags$code("TFA19"), " — Annual Road Freight by Type of Goods (NST 2007 groups). Source for the NST goods breakdown line chart."),
-                  tags$li(tags$code("TFA01"), " — Annual Road Freight by Main Use of Vehicle. Source for the main use stacked bar chart."),
                   tags$li(tags$code("TAA04"), " — Aviation Activity at Irish Airports 2016–2019 (passengers, freight, commercial flights)."),
                   tags$li(tags$code("TAA06"), " — Aviation Activity at Irish Airports 2020–2024 (passengers, freight, commercial flights). Combined with TAA04 for the indexed aviation chart.")
                 ),
@@ -2016,92 +1967,6 @@ server <- function(input, output, session) {
                          showline = FALSE, zeroline = FALSE),
         legend    = list(orientation = "h", x = 0, y = -0.25),
         hovermode = "x unified"
-      )
-  })
-  
-  output$avoid_freight_main_use_line <- renderPlotly({
-    # Wilke: for 10 categories, use a palette with strong perceptual separation.
-    # Group by semantic type: commercial (blues), delivery (oranges/reds), agricultural (greens)
-    colours <- c(
-      "Import/Export work"                                 = "#405381",  # navy
-      "Other work"                                         = "#8693b3",  # light navy
-      "Delivery of goods to retail outlets"                = "#e6861a",  # amber
-      "Delivery of goods to wholesalers"                   = "#f1a340",  # light amber
-      "Delivery of goods to households"                    = "#fdd49e",  # pale amber
-      "Delivery of materials and fuels to factories"       = "#c0392b",  # red
-      "Delivery of goods to road works or building sites"  = "#e57373",  # light red
-      "Carriage of livestock"                              = "#4dac26",  # green
-      "Carriage of other farm produce from farms"          = "#7fbc41",  # light green
-      "Carriage of fertilisers, feeding stuffs etc. to farms" = "#b8e186" # pale green
-    )
-    
-    mu <- data$freight_main_use
-    
-    p <- plot_ly()
-    for (grp in names(colours)) {
-      grp_data <- mu %>% filter(Main_Use == grp)
-      if (nrow(grp_data) == 0) next
-      p <- p %>% add_trace(
-        data = grp_data,
-        x = ~Year, y = ~Tonne_Km_Million,
-        type = "scatter", mode = "lines+markers",
-        name = grp,
-        line   = list(color = colours[[grp]], width = 2),
-        marker = list(size = 6, color = colours[[grp]]),
-        hovertemplate = paste0("<b>", grp, "</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>")
-      )
-    }
-    
-    p %>%
-      layout(
-        xaxis     = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
-        yaxis     = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
-                         showline = FALSE, zeroline = FALSE),
-        legend    = list(orientation = "h", x = 0, y = -0.4, font = list(size = 11)),
-        hovermode = "x unified",
-        margin    = list(b = 160)
-      )
-  })
-  
-  output$avoid_freight_main_use_stack <- renderPlotly({
-    colours <- c(
-      "Import/Export work"                                 = "#405381",
-      "Other work"                                         = "#8693b3",
-      "Delivery of goods to retail outlets"                = "#e6861a",
-      "Delivery of goods to wholesalers"                   = "#f1a340",
-      "Delivery of goods to households"                    = "#fdd49e",
-      "Delivery of materials and fuels to factories"       = "#c0392b",
-      "Delivery of goods to road works or building sites"  = "#e57373",
-      "Carriage of livestock"                              = "#4dac26",
-      "Carriage of other farm produce from farms"          = "#7fbc41",
-      "Carriage of fertilisers, feeding stuffs etc. to farms" = "#b8e186"
-    )
-    
-    mu <- data$freight_main_use
-    
-    p <- plot_ly()
-    for (grp in names(colours)) {
-      grp_data <- mu %>% filter(Main_Use == grp)
-      if (nrow(grp_data) == 0) next
-      p <- p %>% add_trace(
-        data = grp_data,
-        x = ~Year, y = ~Tonne_Km_Million,
-        type = "bar",
-        name = grp,
-        marker = list(color = colours[[grp]]),
-        hovertemplate = paste0("<b>", grp, "</b><br>%{x}: %{y:,.0f}m tonne-km<extra></extra>")
-      )
-    }
-    
-    p %>%
-      layout(
-        barmode   = "stack",
-        xaxis     = list(title = "Year", dtick = 1, showgrid = FALSE, showline = FALSE, ticks = "outside"),
-        yaxis     = list(title = "Million tonne-kilometres", gridcolor = "#e8ecf4", gridwidth = 1,
-                         showline = FALSE, zeroline = FALSE),
-        legend    = list(orientation = "h", x = 0, y = -0.4, font = list(size = 11)),
-        hovermode = "x unified",
-        margin    = list(b = 160)
       )
   })
   
