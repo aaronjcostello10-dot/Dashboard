@@ -1,0 +1,5 @@
+39: get_actual_cso_data [/home/remote/costelloa/R/Climate_Action_Plan_Transport_Dashboard/CAP_Transport_Dashboard.R#25]
+  38: server [/home/remote/costelloa/R/Climate_Action_Plan_Transport_Dashboard/CAP_Transport_Dashboard.R#1608]
+   1: runApp
+Error in pivot_longer(., cols = -any_of(c("Statistic", "Sector", "Fuel")),  : 
+  Can't combine `Fuel.Type` <factor<462d5>> and `1990` <integer>.
