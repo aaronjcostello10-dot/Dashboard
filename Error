@@ -3,3 +3,8 @@
    1: runApp
 Error in pivot_longer(., cols = -any_of(c("Statistic", "Sector", "Fuel")),  : 
   Can't combine `Fuel.Type` <factor<462d5>> and `1990` <integer>.
+
+
+Error in rename(., Vehicle_Population = `Vehicle Population (Number)`,  : 
+  Can't rename columns that don't exist.
+✖ Column `Vehicle Population (Number)` doesn't exist.
