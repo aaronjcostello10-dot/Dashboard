@@ -17,15 +17,22 @@ library(csodata)
 get_actual_cso_data <- function() {
 
   # Energy consumption by sector (ktoe) — Source: SEAI SEI06
+  # SEI06's Fuel.Type dimension is a hierarchy: individual fuels, running
+  # subtotals (e.g. "Sum of all coal products"), and a grand total ("Sum of
+  # all fuel products"). Summing across all Fuel.Type rows would multiply-count
+  # each sector, so keep only the grand-total row per sector/year. Likewise
+  # the whole-economy total is a Sector value ("Final energy consumption"),
+  # not a Statistic value — SEI06's Statistic column only ever takes one value.
   sectors_of_interest <- c(
     "Sum of all transport", "Residential", "Sum of all industry sub-sectors",
     "Commercial services", "Public services", "Agricultural", "Fisheries"
   )
 
   sei06_long <- cso_get_data("SEI06") %>%
-    filter(Sector %in% sectors_of_interest | grepl("Final energy consumption", Statistic, ignore.case = TRUE)) %>%
+    filter(Fuel.Type == "Sum of all fuel products",
+           Sector %in% c("Final energy consumption", sectors_of_interest)) %>%
     pivot_longer(
-      cols = -any_of(c("Statistic", "Sector", "Fuel")),
+      cols = -any_of(c("Statistic", "Sector", "Fuel.Type")),
       names_to = "Year",
       values_to = "ktoe"
     ) %>%
@@ -33,14 +40,12 @@ get_actual_cso_data <- function() {
     filter(!is.na(ktoe) & Year >= 2018 & Year <= 2024)
 
   total_by_year <- sei06_long %>%
-    filter(grepl("Final energy consumption", Statistic, ignore.case = TRUE)) %>%
-    group_by(Year) %>%
-    summarise(Total = sum(ktoe, na.rm = TRUE), .groups = 'drop')
+    filter(Sector == "Final energy consumption") %>%
+    select(Year, Total = ktoe)
 
   energy_by_sector <- sei06_long %>%
     filter(Sector %in% sectors_of_interest) %>%
-    group_by(Year, Sector) %>%
-    summarise(ktoe = sum(ktoe, na.rm = TRUE), .groups = 'drop') %>%
+    select(Year, Sector, ktoe) %>%
     pivot_wider(names_from = Sector, values_from = ktoe) %>%
     left_join(total_by_year, by = "Year") %>%
     mutate(Transport_Share_Pct = round(100 * `Sum of all transport` / Total, 1)) %>%
